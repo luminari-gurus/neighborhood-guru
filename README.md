@@ -56,17 +56,31 @@
    bun install
    ```
 
-3. **Configure Environment Variables** (Optional):
-   Create a `.env` file from `.env.example`:
+3. **API Key Configuration**:
+
+   > **🔑 Mapbox Access Token (REQUIRED)**  
+   > A Mapbox Access Token (`pk.eyJ1...`) is **required** to render 3D Earth Globe navigation, satellite imagery, 3D building elevation, and street address geocoding.  
+   > You can get a free Mapbox token at [mapbox.com/access-tokens](https://account.mapbox.com/access-tokens/).
+
+   > **🎸 JamBase API Key (OPTIONAL)**  
+   > A JamBase API Key (`jbd_live_...`) is **optional**. If omitted, Neighborhood Guru automatically uses its built-in web microdata scraper, so venue concert listings work out-of-the-box. Providing an optional JamBase Data API v3 key enables instant 50ms direct API responses.
+
+   **Setting up keys:**
+   
+   Option A: Configure via `.env` file:
    ```bash
    cp .env.example .env
    ```
-   Add your keys:
    ```env
-   VITE_MAPBOX_TOKEN=pk.eyJ1...
-   VITE_JAMBASE_TOKEN=jbd_live_...
+   # REQUIRED: Mapbox token for 3D map rendering & geocoding
+   VITE_MAPBOX_TOKEN=pk.eyJ1IjoieW91ci11c2VybmFtZSIsImEiOiJjbHB6Y2V4Yzgx...
+
+   # OPTIONAL: JamBase Data API v3 key for fast concert loading
+   VITE_JAMBASE_TOKEN=jbd_live_your_key_here
    ```
-   > *Note: API keys can also be provided directly inside the app's **⚙️ Settings** modal and are saved to browser `localStorage`.*
+
+   Option B: Configure directly inside the app:
+   You can also enter your keys at any time via the **⚙️ Settings** (or first-launch prompt) modal inside the app. Keys are stored 100% locally in your browser (`localStorage`).
 
 4. **Start the local development server**:
    ```bash
