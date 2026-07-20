@@ -85,6 +85,19 @@ export class UIController {
       bannerOpenKeyModalBtn: document.getElementById('banner-open-key-modal-btn'),
       keyWarningDot: document.getElementById('key-warning-dot'),
 
+      // Weather Header Pill
+      weatherHeaderPill: document.getElementById('weather-header-pill'),
+      weatherIcon: document.getElementById('weather-icon'),
+      weatherTemp: document.getElementById('weather-temp'),
+      weatherDesc: document.getElementById('weather-desc'),
+
+      // 3D Solar Light Controller
+      sunLightController: document.getElementById('sun-light-controller'),
+      sunTimeSlider: document.getElementById('sun-time-slider'),
+      sunTimeDisplay: document.getElementById('sun-time-display'),
+      sunPlayBtn: document.getElementById('sun-play-btn'),
+      sunNowBtn: document.getElementById('sun-now-btn'),
+
       // Toasts
       toastContainer: document.getElementById('toast-container'),
     };
@@ -106,6 +119,35 @@ export class UIController {
       this.elements.currentHomeDisplay.textContent = 'No Home address configured yet';
       this.elements.clearHomeBtn.classList.add('hidden');
     }
+  }
+
+  updateWeatherDisplay(weatherData) {
+    if (!this.elements.weatherHeaderPill) return;
+    if (!weatherData) {
+      this.elements.weatherHeaderPill.classList.add('hidden');
+      return;
+    }
+    this.elements.weatherIcon.textContent = weatherData.icon || '☀️';
+    this.elements.weatherTemp.textContent = `${weatherData.temp}${weatherData.tempUnit || '°F'}`;
+    this.elements.weatherDesc.textContent = weatherData.desc || 'Fair';
+    this.elements.weatherHeaderPill.classList.remove('hidden');
+  }
+
+  formatHourDisplay(hourVal) {
+    const totalMinutes = Math.round(parseFloat(hourVal) * 60);
+    const hrs = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    const padMins = mins < 10 ? `0${mins}` : mins;
+
+    let ampm = 'AM';
+    let h12 = hrs;
+    if (hrs >= 12) {
+      ampm = 'PM';
+      if (hrs > 12) h12 = hrs - 12;
+    }
+    if (h12 === 0) h12 = 12;
+
+    return `${h12}:${padMins} ${ampm}`;
   }
 
   /**

@@ -244,6 +244,62 @@ export class MapboxService {
   }
 
   /**
+   * Set 3D Solar Light Angle & Atmospheric Color based on Time of Day (6 AM - 9 PM)
+   */
+  setSolarLighting(hour = 12) {
+    if (!this.map) return;
+
+    const t = Math.max(6, Math.min(21, parseFloat(hour)));
+    const progress = (t - 6) / 15; // 0 at 6am, 0.4 at 12pm, 0.8 at 6pm, 1.0 at 9pm
+
+    // Polar angle: 85° at horizon (sunrise/sunset), 15° at zenith (noon)
+    const polar = Math.abs(Math.sin(progress * Math.PI)) * -70 + 85;
+    const azimuth = 70 + progress * 240; // East to West trajectory
+
+    let skyColor = '#87ceeb';
+    let fogColor = '#ffffff';
+    let lightColor = '#ffffff';
+    let intensity = 0.5;
+
+    if (t < 8) {
+      skyColor = '#fdba74';
+      fogColor = '#ffedd5';
+      lightColor = '#f97316';
+      intensity = 0.45;
+    } else if (t > 17 && t <= 19) {
+      skyColor = '#f97316';
+      fogColor = '#fed7aa';
+      lightColor = '#ea580c';
+      intensity = 0.45;
+    } else if (t > 19) {
+      skyColor = '#0f172a';
+      fogColor = '#1e293b';
+      lightColor = '#38bdf8';
+      intensity = 0.25;
+    }
+
+    try {
+      this.map.setLight({
+        anchor: 'viewport',
+        color: lightColor,
+        intensity: intensity,
+        position: [1.2, azimuth, polar],
+      });
+
+      if (this.map.getFog && this.map.getFog()) {
+        this.map.setFog({
+          color: fogColor,
+          'high-color': skyColor,
+          'space-color': t > 19 ? '#020617' : '#0f172a',
+          'horizon-blend': 0.1,
+        });
+      }
+    } catch (err) {
+      console.warn('Could not update solar lighting:', err);
+    }
+  }
+
+  /**
    * Switch between Streets and Satellite map styles
    */
   setStyle(styleName) {

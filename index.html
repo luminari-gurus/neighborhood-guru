@@ -62,8 +62,13 @@
         </button>
       </div>
 
-      <!-- Quick Navigation & Style Toggles -->
-      <div class="header-controls">
+        <!-- Live Local Weather Header Pill -->
+        <div id="weather-header-pill" class="weather-pill glass-pill hidden" title="Live Neighborhood Weather Forecast (Open-Meteo)">
+          <span id="weather-icon">☀️</span>
+          <span id="weather-temp">--°F</span>
+          <span id="weather-desc" class="weather-desc">Loading...</span>
+        </div>
+
         <button id="fly-home-btn" class="btn btn-glass" title="Fly to Home Address">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
@@ -144,6 +149,29 @@
       </svg>
       <span>Click anywhere on the map to add contacts or neighborhood details!</span>
       <button class="hint-close-btn" id="dismiss-hint-btn">&times;</button>
+    </div>
+
+    <!-- 3D Solar Position & Building Shadow Controller Panel -->
+    <div id="sun-light-controller" class="sun-controller-panel glass-panel">
+      <div class="sun-controller-header">
+        <div class="sun-title">
+          <span>☀️ 3D Solar & Shadows</span>
+          <span id="sun-time-display" class="sun-time-badge">12:00 PM</span>
+        </div>
+        <div class="sun-actions">
+          <button id="sun-play-btn" class="btn btn-glass btn-sm" title="Auto animate sun trajectory">
+            ▶ Play
+          </button>
+          <button id="sun-now-btn" class="btn btn-glass btn-sm" title="Reset to current local time">
+            Now
+          </button>
+        </div>
+      </div>
+      <div class="sun-slider-wrapper">
+        <span class="sun-time-label">6 AM 🌅</span>
+        <input type="range" id="sun-time-slider" min="6" max="21" step="0.25" value="12" />
+        <span class="sun-time-label">9 PM 🌇</span>
+      </div>
     </div>
 
     <!-- Location Contact Editor Modal / Drawer -->

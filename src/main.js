@@ -5,6 +5,7 @@
 import { StorageService } from './js/storage.js';
 import { MapboxService } from './js/mapbox-service.js';
 import { UIController } from './js/ui.js';
+import { WeatherService } from './js/weather-service.js';
 
 class NeighborhoodGuruApp {
   constructor() {
@@ -14,6 +15,7 @@ class NeighborhoodGuruApp {
 
     this.homeAddress = null;
     this.savedPlaces = [];
+    this.sunAnimationTimer = null;
   }
 
   async init() {
@@ -47,6 +49,9 @@ class NeighborhoodGuruApp {
     // 5. Check Mapbox Key Status
     const hasKey = Boolean(token && token.trim().startsWith('pk.'));
     this.ui.updateKeyWarningState(hasKey);
+
+    // 6. Fetch & Display Live Weather
+    this.fetchAndDisplayWeather();
 
     // 6. Safely initialize Mapbox Engine
     if (hasKey) {
@@ -330,6 +335,50 @@ class NeighborhoodGuruApp {
       el.mapHintBanner.style.display = 'none';
     });
 
+    // --- 3D Solar Light Controller & Weather Handlers ---
+    if (el.sunTimeSlider) {
+      el.sunTimeSlider.addEventListener('input', (e) => {
+        const hourVal = parseFloat(e.target.value);
+        el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(hourVal);
+        this.mapboxService.setSolarLighting(hourVal);
+      });
+    }
+
+    if (el.sunNowBtn) {
+      el.sunNowBtn.addEventListener('click', () => {
+        if (this.sunAnimationTimer) {
+          clearInterval(this.sunAnimationTimer);
+          this.sunAnimationTimer = null;
+          if (el.sunPlayBtn) el.sunPlayBtn.textContent = '▶ Play';
+        }
+        const now = new Date();
+        const currentHour = now.getHours() + now.getMinutes() / 60;
+        const clamped = Math.max(6, Math.min(21, currentHour));
+        el.sunTimeSlider.value = clamped;
+        el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(clamped);
+        this.mapboxService.setSolarLighting(clamped);
+      });
+    }
+
+    if (el.sunPlayBtn) {
+      el.sunPlayBtn.addEventListener('click', () => {
+        if (this.sunAnimationTimer) {
+          clearInterval(this.sunAnimationTimer);
+          this.sunAnimationTimer = null;
+          el.sunPlayBtn.textContent = '▶ Play';
+        } else {
+          el.sunPlayBtn.textContent = '⏸ Pause';
+          this.sunAnimationTimer = setInterval(() => {
+            let current = parseFloat(el.sunTimeSlider.value) + 0.25;
+            if (current > 21) current = 6;
+            el.sunTimeSlider.value = current;
+            el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(current);
+            this.mapboxService.setSolarLighting(current);
+          }, 300);
+        }
+      });
+    }
+
     // --- Global Keyboard Event Handlers (ESC to close modals) ---
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' || e.key === 'Esc') {
@@ -362,6 +411,22 @@ class NeighborhoodGuruApp {
         }
       });
     });
+  }
+
+  /**
+   * Fetch Live Weather via Open-Meteo API
+   */
+  async fetchAndDisplayWeather() {
+    let lat = 37.7749;
+    let lng = -122.4194;
+
+    if (this.homeAddress && this.homeAddress.lat && this.homeAddress.lng) {
+      lat = this.homeAddress.lat;
+      lng = this.homeAddress.lng;
+    }
+
+    const weather = await WeatherService.getWeather(lat, lng);
+    this.ui.updateWeatherDisplay(weather);
   }
 
   /**
@@ -446,6 +511,7 @@ class NeighborhoodGuruApp {
     this.mapboxService.renderHomeMarker(homeData);
     this.ui.updateHomeHeaderStatus(homeData);
     this.mapboxService.flyToHome(homeData);
+    this.fetchAndDisplayWeather();
     this.ui.showToast(`Home address set to ${homeData.name.split(',')[0]}!`, 'success');
   }
 
