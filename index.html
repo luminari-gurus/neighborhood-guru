@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Neighborhood Guru - Your Interactive Neighborhood Hub</title>
+  <meta name="description" content="Explore your neighborhood, manage local contact information, and navigate seamlessly between 3D Earth space view and street detail." />
+  
+  <!-- Google Fonts: Outfit & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Mapbox GL JS CSS -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.css" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Map Canvas Container -->
+    <div id="map"></div>
+
+    <!-- Top Floating Header Bar -->
+    <header class="header-bar">
+      <div class="header-brand">
+        <div class="logo-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">Neighborhood Guru</span>
+          <span class="brand-subtitle" id="home-status-subtitle">Earth Globe View</span>
+        </div>
+      </div>
+
+      <!-- Address Search / Home Location Bar -->
+      <div class="search-box-container">
+        <div class="search-input-wrapper">
+          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input type="text" id="address-search-input" placeholder="Search address or location..." autocomplete="off" />
+          <button id="search-go-btn" class="btn-icon-inside" title="Go to address">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+          </button>
+        </div>
+        <button id="add-location-btn" class="btn btn-primary btn-sm" title="Add location details for current map focus">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          <span>Add Location</span>
+        </button>
+        <button id="set-home-btn" class="btn btn-accent btn-sm" title="Set currently focused location as your Home address">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          </svg>
+          <span>Set Home</span>
+        </button>
+      </div>
+
+      <!-- Quick Navigation & Style Toggles -->
+      <div class="header-controls">
+        <button id="fly-home-btn" class="btn btn-glass" title="Fly to Home Address">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          </svg>
+          <span class="btn-label">Home</span>
+        </button>
+
+        <button id="fly-globe-btn" class="btn btn-glass" title="View 3D Earth Globe">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+            <path d="M2 12h20"/>
+          </svg>
+          <span class="btn-label">Earth</span>
+        </button>
+
+        <!-- Map Style Toggle Pills -->
+        <div class="style-switcher" id="style-switcher">
+          <button class="style-btn active" data-style="streets" title="Streets View">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/>
+              <line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/>
+            </svg>
+            <span>Streets</span>
+          </button>
+          <button class="style-btn" data-style="satellite" title="Satellite View">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13 7 9 3 5 7l4 4 4-4Z"/><path d="m17 11 4 4-4 4-4-4 4-4Z"/><path d="m8 12 4 4"/><path d="m16 8 4 4"/>
+            </svg>
+            <span>Satellite</span>
+          </button>
+        </div>
+
+        <!-- Places Drawer Toggle Button -->
+        <button id="toggle-sidebar-btn" class="btn btn-glass btn-badge-wrapper" title="Saved Neighborhood Places">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span class="btn-label">Places</span>
+          <span id="places-count-badge" class="badge">0</span>
+        </button>
+
+        <!-- Settings / API Key Button -->
+        <button id="open-settings-btn" class="btn btn-glass btn-icon-only" title="Mapbox Settings & Key">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Map Click Instruction Banner (Appears when map is ready) -->
+    <div class="map-hint-banner" id="map-hint-banner">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+      </svg>
+      <span>Click anywhere on the map to add contacts or neighborhood details!</span>
+      <button class="hint-close-btn" id="dismiss-hint-btn">&times;</button>
+    </div>
+
+    <!-- Location Contact Editor Modal / Drawer -->
+    <div id="location-modal" class="modal-overlay hidden">
+      <div class="modal-card glass-panel">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="modal-badge-icon" id="modal-category-badge">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
+              </svg>
+            </span>
+            <div>
+              <h3 id="location-modal-title">Add Neighborhood Location</h3>
+              <p class="modal-subtitle" id="location-modal-coords">Coordinates: --</p>
+            </div>
+          </div>
+          <button class="btn-close" id="close-location-modal">&times;</button>
+        </div>
+
+        <form id="location-form" class="modal-body">
+          <input type="hidden" id="form-location-id" />
+          <input type="hidden" id="form-lat" />
+          <input type="hidden" id="form-lng" />
+
+          <div class="form-grid">
+            <div class="form-group full-width">
+              <label for="form-name">Place / Location Name <span class="required">*</span></label>
+              <input type="text" id="form-name" placeholder="e.g. The Johnsons, Oak Street Bakery, Electrician Dave" required />
+            </div>
+
+            <div class="form-group">
+              <label for="form-category">Category</label>
+              <select id="form-category">
+                <option value="neighbor">Neighbor 🏡</option>
+                <option value="service">Service / Trade 🛠️</option>
+                <option value="favorite">Favorite Spot ☕</option>
+                <option value="business">Local Business 🏪</option>
+                <option value="emergency">Emergency / Utility 🚨</option>
+                <option value="other">Other 📍</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="form-contact-name">Contact Person</label>
+              <input type="text" id="form-contact-name" placeholder="e.g. Sarah & John" />
+            </div>
+
+            <div class="form-group full-width">
+              <div class="section-label-header">
+                <label>Contact Info (Phones & Emails)</label>
+                <button type="button" id="add-contact-field-btn" class="btn btn-secondary btn-sm">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  <span>Add Phone / Email</span>
+                </button>
+              </div>
+              <div id="contact-methods-container" class="contact-methods-list">
+                <!-- Dynamic contact rows rendered here -->
+              </div>
+            </div>
+
+            <div class="form-group full-width">
+              <label for="form-address">Street Address / Unit</label>
+              <input type="text" id="form-address" placeholder="e.g. 742 Evergreen Terrace" />
+            </div>
+
+            <div class="form-group full-width">
+              <label for="form-notes">Notes & Key Details</label>
+              <textarea id="form-notes" rows="3" placeholder="e.g. Has a friendly golden retriever. Spare house key available. Garage code: 1234."></textarea>
+            </div>
+
+            <div class="form-group full-width">
+              <label>Marker Color</label>
+              <div class="color-picker-group">
+                <label class="color-option">
+                  <input type="radio" name="form-color" value="#3b82f6" checked />
+                  <span class="color-swatch" style="background-color: #3b82f6;"></span>
+                </label>
+                <label class="color-option">
+                  <input type="radio" name="form-color" value="#10b981" />
+                  <span class="color-swatch" style="background-color: #10b981;"></span>
+                </label>
+                <label class="color-option">
+                  <input type="radio" name="form-color" value="#f59e0b" />
+                  <span class="color-swatch" style="background-color: #f59e0b;"></span>
+                </label>
+                <label class="color-option">
+                  <input type="radio" name="form-color" value="#ef4444" />
+                  <span class="color-swatch" style="background-color: #ef4444;"></span>
+                </label>
+                <label class="color-option">
+                  <input type="radio" name="form-color" value="#8b5cf6" />
+                  <span class="color-swatch" style="background-color: #8b5cf6;"></span>
+                </label>
+                <label class="color-option">
+                  <input type="radio" name="form-color" value="#ec4899" />
+                  <span class="color-swatch" style="background-color: #ec4899;"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="cancel-location-btn">Cancel</button>
+            <button type="button" class="btn btn-danger hidden" id="delete-location-btn">Delete Location</button>
+            <button type="submit" class="btn btn-primary" id="save-location-btn">Save Location</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Saved Places Sidebar Drawer -->
+    <aside id="places-sidebar" class="sidebar-drawer glass-panel">
+      <div class="sidebar-header">
+        <div class="sidebar-title-group">
+          <h3>Saved Locations</h3>
+          <span class="sidebar-subtitle">Your neighborhood contacts & spots</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button id="sidebar-add-btn" class="btn btn-primary btn-sm" title="Add location">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg> Add
+          </button>
+          <button class="btn-close" id="close-sidebar-btn">&times;</button>
+        </div>
+      </div>
+
+      <div class="sidebar-search">
+        <input type="text" id="sidebar-search-input" placeholder="Filter by name, tag, phone..." />
+      </div>
+
+      <!-- Filter Category Pills -->
+      <div class="filter-pills" id="sidebar-filter-pills">
+        <button class="pill active" data-filter="all">All</button>
+        <button class="pill" data-filter="neighbor">Neighbors</button>
+        <button class="pill" data-filter="service">Services</button>
+        <button class="pill" data-filter="favorite">Favorites</button>
+        <button class="pill" data-filter="emergency">Emergency</button>
+      </div>
+
+      <div class="sidebar-content" id="saved-places-list">
+        <!-- Dynamic saved place cards rendered here -->
+        <div class="empty-state">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
+          </svg>
+          <p>No saved neighborhood locations yet.</p>
+          <span>Click anywhere on the map to add contacts & details!</span>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="export-data-btn" class="btn btn-secondary btn-sm" title="Export json backup">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Export
+        </button>
+        <label for="import-file-input" class="btn btn-secondary btn-sm" title="Import json backup">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Import
+        </label>
+        <input type="file" id="import-file-input" accept=".json" class="hidden" />
+      </div>
+    </aside>
+
+    <!-- Settings / API Key Modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+      <div class="modal-card glass-panel modal-small">
+        <div class="modal-header">
+          <h3>Mapbox Configuration</h3>
+          <button class="btn-close" id="close-settings-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted">Enter your Mapbox Access Token (`pk....`) to activate satellite imaging, 3D Globe rendering, and geocoding.</p>
+          <div class="form-group margin-top-md">
+            <label for="settings-mapbox-token">Mapbox Access Token</label>
+            <input type="password" id="settings-mapbox-token" placeholder="pk.eyJ1..." />
+          </div>
+          <div class="home-address-section margin-top-md">
+            <label>Current Home Address</label>
+            <div id="current-home-display" class="info-box">No Home address configured</div>
+            <button id="clear-home-btn" class="btn btn-danger btn-sm margin-top-sm hidden">Clear Home Address</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="cancel-settings-btn">Cancel</button>
+          <button class="btn btn-primary" id="save-settings-btn">Save Key & Reload Map</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container"></div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
