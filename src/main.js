@@ -7,6 +7,7 @@ import { MapboxService } from './js/mapbox-service.js';
 import { UIController } from './js/ui.js';
 import { WeatherService } from './js/weather-service.js';
 import { OverpassService } from './js/overpass-service.js';
+import { JamBaseService } from './js/jambase-service.js';
 
 class NeighborhoodGuruApp {
   constructor() {
@@ -406,6 +407,71 @@ class NeighborhoodGuruApp {
       });
     }
 
+    // --- JamBase Venue Search & Selection Handler ---
+    if (el.searchJambaseBtn) {
+      el.searchJambaseBtn.addEventListener('click', async () => {
+        const venueName = el.formName.value.trim();
+        const currentInput = el.formJambaseId ? el.formJambaseId.value.trim() : '';
+        const query = currentInput || venueName;
+        const addressText = el.formAddress ? el.formAddress.value.trim() : '';
+
+        if (!query) {
+          this.ui.showToast('Enter a venue name or JamBase ID/URL to search.', 'warning');
+          return;
+        }
+
+        // Extract city & state from address if available
+        let locationContext = {};
+        if (addressText) {
+          const parts = addressText.split(',').map(s => s.trim());
+          if (parts.length >= 2) {
+            locationContext.city = parts[parts.length - 2] || parts[0];
+            const stateZip = parts[parts.length - 1].split(' ');
+            locationContext.state = stateZip[0] || '';
+          } else {
+            locationContext.city = parts[0];
+          }
+        } else if (this.homeAddress && this.homeAddress.name) {
+          const parts = this.homeAddress.name.split(',').map(s => s.trim());
+          if (parts.length >= 2) {
+            locationContext.city = parts[1] || parts[0];
+          }
+        }
+
+        this.ui.showToast(`Searching JamBase for "${query}"...`, 'info');
+        const matches = await JamBaseService.searchVenues(query, locationContext);
+
+        this.ui.openJambasePickerModal();
+        if (this.ui.elements.jambasePickerSubtitle) {
+          this.ui.elements.jambasePickerSubtitle.textContent = `Found ${matches.length} venue match${matches.length === 1 ? '' : 'es'} for "${query}"`;
+        }
+
+        this.ui.renderJambaseSearchResults(matches, (selectedVenue) => {
+          if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
+          if (el.jambaseStatusMsg) {
+            const locText = [selectedVenue.city, selectedVenue.state].filter(Boolean).join(', ');
+            el.jambaseStatusMsg.textContent = `✓ Linked to ${selectedVenue.name} ${locText ? `(${locText})` : ''}`;
+          }
+          this.ui.showToast(`Linked venue to ${selectedVenue.name}!`, 'success');
+        });
+      });
+    }
+
+    if (el.formJambaseId) {
+      el.formJambaseId.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (el.searchJambaseBtn) {
+            el.searchJambaseBtn.click();
+          }
+        }
+      });
+    }
+
+    if (el.closeJambasePickerModal) {
+      el.closeJambasePickerModal.addEventListener('click', () => this.ui.closeJambasePickerModal());
+    }
+
     // --- Global Keyboard Event Handlers (ESC to close modals) ---
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' || e.key === 'Esc') {
@@ -422,11 +488,14 @@ class NeighborhoodGuruApp {
         if (el.poiDiscoveryModal && !el.poiDiscoveryModal.classList.contains('hidden')) {
           this.ui.closePoiModal();
         }
+        if (el.jambasePickerModal && !el.jambasePickerModal.classList.contains('hidden')) {
+          this.ui.closeJambasePickerModal();
+        }
       }
     });
 
     // --- Modal Overlay Backdrop Click Handlers ---
-    [el.locationModal, el.settingsModal, el.keyPromptModal, el.poiDiscoveryModal].forEach((modal) => {
+    [el.locationModal, el.settingsModal, el.keyPromptModal, el.poiDiscoveryModal, el.jambasePickerModal].forEach((modal) => {
       if (!modal) return;
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
@@ -439,6 +508,8 @@ class NeighborhoodGuruApp {
             this.ui.closeKeyPromptModal();
           } else if (modal === el.poiDiscoveryModal) {
             this.ui.closePoiModal();
+          } else if (modal === el.jambasePickerModal) {
+            this.ui.closeJambasePickerModal();
           }
         }
       });
@@ -665,12 +736,17 @@ class NeighborhoodGuruApp {
     const contacts = this.ui.getContactFieldsData();
     const events = this.ui.getEventFieldsData();
 
+    const jambaseId = el.formJambaseId ? el.formJambaseId.value.trim() : (el.formPollstarId ? el.formPollstarId.value.trim() : '');
+    const capacityVal = el.formCapacity ? el.formCapacity.value.trim() : '';
+
     const placeData = {
       id: existingId ? existingId : undefined,
       lat: parseFloat(el.formLat.value),
       lng: parseFloat(el.formLng.value),
       name: name,
       category: el.formCategory.value,
+      capacity: el.formCategory.value === 'venue' ? capacityVal : '',
+      jambaseId: jambaseId,
       people: people,
       contacts: contacts,
       events: events,

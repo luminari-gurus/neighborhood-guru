@@ -1,4 +1,5 @@
 import { getPlaceContacts, getPlacePeople, getPlaceEvents, isEventHappeningToday } from './storage.js';
+import { JamBaseService } from './jambase-service.js';
 
 export class UIController {
   constructor() {
@@ -12,6 +13,22 @@ export class UIController {
     this.bindPeopleFieldEvents();
     this.bindContactFieldEvents();
     this.bindEventFieldEvents();
+
+    if (this.elements.formCategory) {
+      this.elements.formCategory.addEventListener('change', () => {
+        this.updateCategoryFields(this.elements.formCategory.value);
+      });
+    }
+  }
+
+  updateCategoryFields(category) {
+    if (this.elements.formCapacityContainer) {
+      if (category === 'venue') {
+        this.elements.formCapacityContainer.classList.remove('hidden');
+      } else {
+        this.elements.formCapacityContainer.classList.add('hidden');
+      }
+    }
   }
 
   cacheElements() {
@@ -47,6 +64,11 @@ export class UIController {
       formLng: document.getElementById('form-lng'),
       formName: document.getElementById('form-name'),
       formCategory: document.getElementById('form-category'),
+      formCapacityContainer: document.getElementById('form-capacity-container'),
+      formCapacity: document.getElementById('form-capacity'),
+      formJambaseId: document.getElementById('form-jambase-id'),
+      searchJambaseBtn: document.getElementById('search-jambase-btn'),
+      jambaseStatusMsg: document.getElementById('jambase-status-msg'),
       addPersonFieldBtn: document.getElementById('add-person-field-btn'),
       peopleListContainer: document.getElementById('people-list-container'),
       addContactFieldBtn: document.getElementById('add-contact-field-btn'),
@@ -107,6 +129,12 @@ export class UIController {
       importAllPoisBtn: document.getElementById('import-all-pois-btn'),
       poiCountNum: document.getElementById('poi-count-num'),
       poiResultsContainer: document.getElementById('poi-results-container'),
+
+      // JamBase Venue Selector Modal
+      jambasePickerModal: document.getElementById('jambase-picker-modal'),
+      closeJambasePickerModal: document.getElementById('close-jambase-picker-modal'),
+      jambasePickerSubtitle: document.getElementById('jambase-picker-subtitle'),
+      jambasePickerResultsContainer: document.getElementById('jambase-picker-results-container'),
 
       // Toasts
       toastContainer: document.getElementById('toast-container'),
@@ -223,6 +251,66 @@ export class UIController {
         card.style.opacity = '0.5';
         card.querySelector('.btn-import-single').textContent = '✓ Imported';
         card.querySelector('.btn-import-single').disabled = true;
+      });
+
+      container.appendChild(card);
+    });
+  }
+
+  /**
+   * JamBase Venue Match Selector Modal Controls
+   */
+  openJambasePickerModal() {
+    if (this.elements.jambasePickerModal) {
+      this.elements.jambasePickerModal.classList.remove('hidden');
+    }
+  }
+
+  closeJambasePickerModal() {
+    if (this.elements.jambasePickerModal) {
+      this.elements.jambasePickerModal.classList.add('hidden');
+    }
+  }
+
+  renderJambaseSearchResults(matches = [], onSelect = null) {
+    const container = this.elements.jambasePickerResultsContainer;
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!matches || matches.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <p>No matching venues found on JamBase. Try refining the search name or pasting the direct JamBase venue URL.</p>
+        </div>
+      `;
+      return;
+    }
+
+    matches.forEach((venue) => {
+      const card = document.createElement('div');
+      card.className = 'poi-item-card';
+
+      const locationBadge = [venue.city, venue.state].filter(Boolean).join(', ');
+
+      card.innerHTML = `
+        <div class="poi-title-group" style="gap: 4px;">
+          <span class="poi-name" style="color: #c084fc; font-size: 0.98rem; font-weight: 700;">🎸 ${this.escapeHtml(venue.name)}</span>
+          <div class="poi-meta" style="flex-wrap: wrap; gap: 8px; font-size: 0.78rem;">
+            ${locationBadge ? `<span style="color: #10b981; font-weight: 600;">📍 ${this.escapeHtml(locationBadge)}</span>` : ''}
+            ${venue.address && venue.address !== locationBadge ? `<span style="color: #94a3b8;">🏢 ${this.escapeHtml(venue.address)}</span>` : ''}
+            ${venue.type ? `<span style="color: #60a5fa;">🎭 ${this.escapeHtml(venue.type)}</span>` : ''}
+            ${venue.capacity ? `<span style="color: #fbbf24;">👥 Cap: ${this.escapeHtml(venue.capacity)}</span>` : ''}
+            <span style="font-family: monospace; font-size: 0.72rem; color: #64748b; background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 4px;">ID: ${this.escapeHtml(venue.id)}</span>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-sm btn-select-venue" style="white-space: nowrap; margin-left: 8px;">
+          ✓ Select Venue
+        </button>
+      `;
+
+      card.querySelector('.btn-select-venue').addEventListener('click', () => {
+        if (onSelect) onSelect(venue);
+        this.closeJambasePickerModal();
       });
 
       container.appendChild(card);
@@ -440,7 +528,21 @@ export class UIController {
 
     this.elements.locationModalCoords.textContent = `Coordinates: ${Number(data.lat).toFixed(5)}, ${Number(data.lng).toFixed(5)}`;
     this.elements.formName.value = data.name || '';
-    this.elements.formCategory.value = data.category || 'neighbor';
+    const categoryVal = data.category || 'neighbor';
+    this.elements.formCategory.value = categoryVal;
+    this.updateCategoryFields(categoryVal);
+
+    if (this.elements.formCapacity) {
+      this.elements.formCapacity.value = data.capacity || '';
+    }
+
+    const jbId = data.jambaseId || data.pollstarId || '';
+    if (this.elements.formJambaseId) {
+      this.elements.formJambaseId.value = jbId;
+    }
+    if (this.elements.jambaseStatusMsg) {
+      this.elements.jambaseStatusMsg.textContent = jbId ? `✓ Linked to JamBase Venue (${jbId})` : '';
+    }
 
     // Populate dynamic People fields
     const people = getPlacePeople(data);
@@ -591,6 +693,35 @@ export class UIController {
         }
       });
 
+      let jambaseCardHtml = '';
+      const jbId = place.jambaseId || place.pollstarId;
+      if (jbId) {
+        const jambaseUrl = jbId.startsWith('http') ? jbId : `https://www.jambase.com/venue/${jbId}`;
+        jambaseCardHtml = `
+          <div class="jb-card-shows-box" data-jambase-id="${this.escapeHtml(jbId)}" style="margin-top: 8px; padding: 8px 10px; background: rgba(168, 85, 247, 0.08); border-radius: 8px; border: 1px solid rgba(168, 85, 247, 0.25);">
+            <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.76rem; color: #c084fc; font-weight: 700;">
+              <span>🎸 Upcoming Shows</span>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button class="card-refresh-jb-btn" title="Refresh JamBase schedule" style="background: none; border: none; color: #c084fc; cursor: pointer; padding: 0 2px; display: flex; align-items: center;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6"/>
+                    <path d="M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M21.5 12.5a10 10 0 0 1-18.8 4.3L2.5 16"/>
+                  </svg>
+                </button>
+                <a href="${jambaseUrl}" target="_blank" rel="noopener noreferrer" style="color: #a855f7; font-size: 0.71rem; text-decoration: none;">JamBase ↗</a>
+              </div>
+            </div>
+            <div class="jb-card-shows-list" style="font-size: 0.75rem; margin-top: 4px; color: #cbd5e1;">Loading live schedule...</div>
+          </div>
+        `;
+        actionButtonsHtml += `<a href="${jambaseUrl}" target="_blank" rel="noopener noreferrer" class="btn btn-glass btn-sm" style="color: #c084fc; border-color: rgba(168, 85, 247, 0.4);" title="View Concerts on JamBase">🎸 JamBase ↗</a>`;
+      }
+
+      let capacityHtml = '';
+      if (place.category === 'venue' && place.capacity) {
+        capacityHtml = `<div class="contact-row">👥 <strong style="font-size: 0.75rem; color: #fbbf24;">Max Capacity:</strong> ${this.escapeHtml(place.capacity)} people</div>`;
+      }
+
       card.innerHTML = `
         <div class="card-header-line">
           <div class="place-title-group">
@@ -602,6 +733,8 @@ export class UIController {
           </span>
         </div>
         ${peopleHtml}
+        ${capacityHtml}
+        ${jambaseCardHtml}
         ${eventsHtml}
         ${contactsHtml}
         ${place.address ? `<div class="contact-row">📍 ${this.escapeHtml(place.address)}</div>` : ''}
@@ -633,6 +766,42 @@ export class UIController {
       });
 
       listContainer.appendChild(card);
+    });
+
+    // Asynchronously fetch upcoming shows for all venue cards in sidebar
+    listContainer.querySelectorAll('.jb-card-shows-box').forEach(async (box) => {
+      const jbId = box.dataset.jambaseId;
+      const listEl = box.querySelector('.jb-card-shows-list');
+      const refreshBtn = box.querySelector('.card-refresh-jb-btn');
+
+      const loadShows = async (force = false) => {
+        if (!jbId || !listEl) return;
+        if (force) listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
+        const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
+        if (shows && shows.length > 0) {
+          listEl.innerHTML = shows.map(s => `
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px; font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; font-weight: ${s.isToday ? '700' : '400'};">
+              <span>${s.isToday ? '🔥 TODAY: ' : '📅 '}<a href="${s.url}" target="_blank" rel="noopener noreferrer" style="color: ${s.isToday ? '#fbbf24' : '#c084fc'}; text-decoration: none;">${this.escapeHtml(s.title)}</a></span>
+              <span style="font-size: 0.7rem; color: #94a3b8; white-space: nowrap;">${this.escapeHtml(s.date)}${s.time ? ` ${this.escapeHtml(s.time)}` : ''}</span>
+            </div>
+          `).join('');
+
+          listEl.querySelectorAll('a').forEach(a => {
+            a.addEventListener('click', (e) => e.stopPropagation());
+          });
+        } else {
+          listEl.innerHTML = `<p style="font-size: 0.72rem; color: #94a3b8; font-style: italic;">No upcoming shows listed on JamBase.</p>`;
+        }
+      };
+
+      loadShows(false);
+
+      if (refreshBtn) {
+        refreshBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          loadShows(true);
+        });
+      }
     });
   }
 

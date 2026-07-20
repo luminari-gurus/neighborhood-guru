@@ -4,6 +4,7 @@
 
 import mapboxgl from 'mapbox-gl';
 import { getPlaceContacts, getPlacePeople, getPlaceEvents, isEventHappeningToday } from './storage.js';
+import { JamBaseService } from './jambase-service.js';
 
 const STYLES = {
   streets: 'mapbox://styles/mapbox/streets-v12',
@@ -506,6 +507,34 @@ export class MapboxService {
         });
       }
 
+      let jambasePopupHtml = '';
+      const jbId = place.jambaseId || place.pollstarId;
+      if (jbId) {
+        const jambaseUrl = jbId.startsWith('http') ? jbId : `https://www.jambase.com/venue/${jbId}`;
+        jambasePopupHtml = `
+          <div id="popup-jb-shows-${place.id}" style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255,255,255,0.15);">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <span style="font-size: 0.76rem; color: #c084fc; font-weight: 700;">🎸 Upcoming JamBase Shows:</span>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button class="popup-refresh-jb-btn" title="Refresh JamBase schedule" style="background: none; border: none; color: #c084fc; cursor: pointer; padding: 0 2px; display: flex; align-items: center;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6"/>
+                    <path d="M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M21.5 12.5a10 10 0 0 1-18.8 4.3L2.5 16"/>
+                  </svg>
+                </button>
+                <a href="${jambaseUrl}" target="_blank" rel="noopener noreferrer" style="color: #a855f7; font-size: 0.7rem; text-decoration: none;">Full List ↗</a>
+              </div>
+            </div>
+            <div class="jb-popup-shows-body" style="font-size: 0.75rem; margin-top: 3px; color: #cbd5e1;">Loading shows...</div>
+          </div>
+        `;
+      }
+
+      let capacityPopupHtml = '';
+      if (place.category === 'venue' && place.capacity) {
+        capacityPopupHtml = `<p style="font-size: 0.78rem; color: #fbbf24; margin-top: 2px;">👥 <strong>Max Capacity:</strong> ${place.capacity} people</p>`;
+      }
+
       // Popup Content
       const popupHtml = `
         <div class="marker-popup-card">
@@ -514,8 +543,10 @@ export class MapboxService {
             <strong style="font-size: 0.95rem;">${place.name}</strong>
           </div>
           ${peoplePopupHtml}
+          ${capacityPopupHtml}
           ${eventsPopupHtml}
           ${popupContactsHtml}
+          ${jambasePopupHtml}
           ${place.notes ? `<p style="font-size: 0.78rem; color: #cbd5e1; margin-top: 6px; font-style: italic;">"${place.notes.substring(0, 70)}${place.notes.length > 70 ? '...' : ''}"</p>` : ''}
           <button class="btn btn-primary btn-sm popup-edit-btn" data-id="${place.id}" style="margin-top: 10px; width: 100%; font-size: 0.75rem; padding: 4px;">View & Edit Details</button>
         </div>
@@ -528,14 +559,44 @@ export class MapboxService {
         .setPopup(popup)
         .addTo(this.map);
 
-      // Handle Edit button click inside popup
-      popup.on('open', () => {
+      // Handle Edit button click & async shows fetching inside popup
+      popup.on('open', async () => {
         const editBtn = popup.getElement().querySelector('.popup-edit-btn');
         if (editBtn && onMarkerClick) {
           editBtn.addEventListener('click', () => {
             onMarkerClick(place);
             popup.remove();
           });
+        }
+
+        if (jbId) {
+          const showsBody = popup.getElement().querySelector(`#popup-jb-shows-${place.id} .jb-popup-shows-body`);
+          const refreshBtn = popup.getElement().querySelector(`#popup-jb-shows-${place.id} .popup-refresh-jb-btn`);
+
+          const renderShows = async (force = false) => {
+            if (!showsBody) return;
+            if (force) showsBody.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
+            const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
+            if (shows && shows.length > 0) {
+              showsBody.innerHTML = shows.map(s => `
+                <p style="font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; margin-top: 3px; font-weight: ${s.isToday ? '700' : '400'};">
+                  ${s.isToday ? '🔥 TODAY: ' : '📅 '}<a href="${s.url}" target="_blank" rel="noopener noreferrer" style="color: ${s.isToday ? '#fbbf24' : '#c084fc'}; text-decoration: none;">${s.title}</a>
+                  <span style="font-size: 0.71rem; color: #94a3b8;"> (${s.date}${s.time ? ` ${s.time}` : ''})</span>
+                </p>
+              `).join('');
+            } else {
+              showsBody.innerHTML = `<p style="font-size: 0.72rem; color: #94a3b8; font-style: italic;">No upcoming shows listed on JamBase.</p>`;
+            }
+          };
+
+          renderShows(false);
+
+          if (refreshBtn) {
+            refreshBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              renderShows(true);
+            });
+          }
         }
       });
 
@@ -550,6 +611,8 @@ export class MapboxService {
     switch (category) {
       case 'neighbor':
         return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+      case 'venue':
+        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 10s3-3 3-8 4 1 7 1 7-6 7-1 3 8 3 8M2 10v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V10M2 10l10 4 10-4"/></svg>`;
       case 'service':
         return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
       case 'favorite':

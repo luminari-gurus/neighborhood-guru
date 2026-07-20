@@ -218,12 +218,37 @@
               <label for="form-category">Category</label>
               <select id="form-category">
                 <option value="neighbor">Neighbor 🏡</option>
+                <option value="venue">Venue / Concert Hall 🎭</option>
                 <option value="service">Service / Trade 🛠️</option>
                 <option value="favorite">Favorite Spot ☕</option>
-                <option value="business">Local Business 🏪</option>
                 <option value="emergency">Emergency / Utility 🚨</option>
                 <option value="other">Other 📍</option>
               </select>
+            </div>
+
+            <!-- JamBase Venue Integration Section -->
+            <div class="form-group full-width">
+              <div class="section-label-header">
+                <label>JamBase Venue Link (Concerts & Shows)</label>
+                <span class="token-help-badge" style="font-size: 0.75rem; color: #a855f7;">🎸 JamBase ID</span>
+              </div>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <input type="text" id="form-jambase-id" placeholder="JamBase Venue ID or URL (e.g. 15421 or jambase.com/venue/the-fillmore-15421)" style="flex: 1;" />
+                <button type="button" id="search-jambase-btn" class="btn btn-glass btn-sm" title="Search venue on JamBase">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                  </svg>
+                  <span>Search JamBase</span>
+                </button>
+              </div>
+              <div id="jambase-status-msg" style="font-size: 0.76rem; color: #a855f7; margin-top: 4px;"></div>
+            </div>
+
+            <!-- Venue Max Capacity Field (Conditional for Venues) -->
+            <div class="form-group full-width hidden" id="form-capacity-container">
+              <label for="form-capacity">Venue Max Capacity (People)</label>
+              <input type="number" id="form-capacity" placeholder="e.g. 500, 1200, 5000" min="1" step="1" />
+            </div>argin-top: 4px;"></div>
             </div>
 
             <!-- People Section -->
@@ -349,6 +374,7 @@
       <div class="filter-pills" id="sidebar-filter-pills">
         <button class="pill active" data-filter="all">All</button>
         <button class="pill pill-event" data-filter="today">📅 Happening Today</button>
+        <button class="pill" data-filter="venue">🎭 Venues</button>
         <button class="pill" data-filter="neighbor">Neighbors</button>
         <button class="pill" data-filter="service">Services</button>
         <button class="pill" data-filter="favorite">Favorites</button>
@@ -516,6 +542,30 @@
 
           <div id="poi-results-container" class="poi-results-list">
             <!-- Dynamic POI card results rendered here -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- JamBase Venue Match Selector Modal -->
+    <div id="jambase-picker-modal" class="modal-overlay hidden" style="z-index: 1050;">
+      <div class="modal-card glass-panel" style="max-width: 540px;">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="modal-badge-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">
+              🎸
+            </span>
+            <div>
+              <h3>Select JamBase Venue Match</h3>
+              <p class="modal-subtitle" id="jambase-picker-subtitle">Select the matching concert venue from JamBase...</p>
+            </div>
+          </div>
+          <button class="btn-close" id="close-jambase-picker-modal">&times;</button>
+        </div>
+
+        <div class="modal-body" style="display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto;">
+          <div id="jambase-picker-results-container" class="poi-results-list">
+            <!-- Dynamic JamBase venue matches rendered here -->
           </div>
         </div>
       </div>
