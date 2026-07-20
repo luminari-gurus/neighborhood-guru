@@ -6,6 +6,7 @@ import { StorageService } from './js/storage.js';
 import { MapboxService } from './js/mapbox-service.js';
 import { UIController } from './js/ui.js';
 import { WeatherService } from './js/weather-service.js';
+import { OverpassService } from './js/overpass-service.js';
 
 class NeighborhoodGuruApp {
   constructor() {
@@ -16,6 +17,8 @@ class NeighborhoodGuruApp {
     this.homeAddress = null;
     this.savedPlaces = [];
     this.sunAnimationTimer = null;
+    this.currentDiscoveredPois = [];
+    this.poiFilter = 'all';
   }
 
   async init() {
@@ -379,6 +382,30 @@ class NeighborhoodGuruApp {
       });
     }
 
+    // --- OpenStreetMap POI Discovery Handlers ---
+    if (el.discoverPoiBtn) {
+      el.discoverPoiBtn.addEventListener('click', () => this.handleDiscoverPois());
+    }
+
+    if (el.closePoiModal) {
+      el.closePoiModal.addEventListener('click', () => this.ui.closePoiModal());
+    }
+
+    if (el.importAllPoisBtn) {
+      el.importAllPoisBtn.addEventListener('click', () => this.importAllPois());
+    }
+
+    if (el.poiCategoryPills) {
+      el.poiCategoryPills.addEventListener('click', (e) => {
+        const pill = e.target.closest('.pill');
+        if (!pill) return;
+        el.poiCategoryPills.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        this.poiFilter = pill.dataset.poiFilter || 'all';
+        this.applyPoiFilter();
+      });
+    }
+
     // --- Global Keyboard Event Handlers (ESC to close modals) ---
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' || e.key === 'Esc') {
@@ -392,11 +419,14 @@ class NeighborhoodGuruApp {
         if (el.keyPromptModal && !el.keyPromptModal.classList.contains('hidden')) {
           this.ui.closeKeyPromptModal();
         }
+        if (el.poiDiscoveryModal && !el.poiDiscoveryModal.classList.contains('hidden')) {
+          this.ui.closePoiModal();
+        }
       }
     });
 
     // --- Modal Overlay Backdrop Click Handlers ---
-    [el.locationModal, el.settingsModal, el.keyPromptModal].forEach((modal) => {
+    [el.locationModal, el.settingsModal, el.keyPromptModal, el.poiDiscoveryModal].forEach((modal) => {
       if (!modal) return;
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
@@ -407,10 +437,117 @@ class NeighborhoodGuruApp {
             this.ui.closeSettingsModal();
           } else if (modal === el.keyPromptModal) {
             this.ui.closeKeyPromptModal();
+          } else if (modal === el.poiDiscoveryModal) {
+            this.ui.closePoiModal();
           }
         }
       });
     });
+  }
+
+  /**
+   * Handle OpenStreetMap POI Discovery
+   */
+  async handleDiscoverPois() {
+    let lat = 37.7749;
+    let lng = -122.4194;
+
+    if (this.mapboxService.map) {
+      const center = this.mapboxService.map.getCenter();
+      lat = center.lat;
+      lng = center.lng;
+    } else if (this.homeAddress) {
+      lat = this.homeAddress.lat;
+      lng = this.homeAddress.lng;
+    }
+
+    this.ui.openPoiModal();
+    if (this.ui.elements.poiStatusSubtitle) {
+      this.ui.elements.poiStatusSubtitle.textContent = `Searching OpenStreetMap near (${lat.toFixed(3)}, ${lng.toFixed(3)})...`;
+    }
+
+    this.currentDiscoveredPois = await OverpassService.fetchNearbyPois(lat, lng, 1500);
+
+    if (this.ui.elements.poiStatusSubtitle) {
+      this.ui.elements.poiStatusSubtitle.textContent = `Found ${this.currentDiscoveredPois.length} public amenities within 1.5km`;
+    }
+
+    this.applyPoiFilter();
+  }
+
+  applyPoiFilter() {
+    const filtered = this.currentDiscoveredPois.filter(p => {
+      if (this.poiFilter === 'all') return true;
+      if (this.poiFilter === 'cafe') return p.typeLabel.includes('Cafe');
+      if (this.poiFilter === 'park') return p.typeLabel.includes('Park');
+      if (this.poiFilter === 'library') return p.typeLabel.includes('Library');
+      if (this.poiFilter === 'ev') return p.typeLabel.includes('EV');
+      return true;
+    });
+
+    this.ui.renderPoiResults(filtered, (poi) => this.importPoi(poi));
+  }
+
+  importPoi(poi) {
+    const placeData = {
+      name: poi.name,
+      category: poi.category,
+      people: [],
+      contacts: [],
+      events: [],
+      address: poi.address,
+      notes: poi.notes,
+      color: poi.color,
+      lat: poi.lat,
+      lng: poi.lng,
+    };
+
+    this.savedPlaces = this.storage.savePlace(placeData);
+    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+    this.ui.renderPlacesList(
+      this.savedPlaces,
+      (place) => this.onPlaceSelected(place),
+      (place) => this.ui.openLocationModal(place)
+    );
+    this.ui.showToast(`Imported ${poi.name.split('(')[0].trim()} to Saved Places!`, 'success');
+  }
+
+  importAllPois() {
+    const filtered = this.currentDiscoveredPois.filter(p => {
+      if (this.poiFilter === 'all') return true;
+      if (this.poiFilter === 'cafe') return p.typeLabel.includes('Cafe');
+      if (this.poiFilter === 'park') return p.typeLabel.includes('Park');
+      if (this.poiFilter === 'library') return p.typeLabel.includes('Library');
+      if (this.poiFilter === 'ev') return p.typeLabel.includes('EV');
+      return true;
+    });
+
+    if (filtered.length === 0) return;
+
+    filtered.forEach(poi => {
+      const placeData = {
+        name: poi.name,
+        category: poi.category,
+        people: [],
+        contacts: [],
+        events: [],
+        address: poi.address,
+        notes: poi.notes,
+        color: poi.color,
+        lat: poi.lat,
+        lng: poi.lng,
+      };
+      this.savedPlaces = this.storage.savePlace(placeData);
+    });
+
+    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+    this.ui.renderPlacesList(
+      this.savedPlaces,
+      (place) => this.onPlaceSelected(place),
+      (place) => this.ui.openLocationModal(place)
+    );
+    this.ui.closePoiModal();
+    this.ui.showToast(`Successfully imported ${filtered.length} local spots!`, 'success');
   }
 
   /**

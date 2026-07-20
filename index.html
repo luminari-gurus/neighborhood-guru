@@ -35,7 +35,7 @@
         </div>
       </div>
 
-      <!-- Address Search / Home Location Bar -->
+      <!-- Address Search Bar (Dedicated & Expanded) -->
       <div class="search-box-container">
         <div class="search-input-wrapper">
           <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -48,11 +48,21 @@
             </svg>
           </button>
         </div>
+      </div>
+
+      <!-- Location Action Buttons Group -->
+      <div class="header-actions">
         <button id="add-location-btn" class="btn btn-primary btn-sm" title="Add location details for current map focus">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          <span>Add Location</span>
+          <span>Add Spot</span>
+        </button>
+        <button id="discover-poi-btn" class="btn btn-secondary btn-sm" title="Discover nearby cafes, parks, libraries, and EV chargers via OpenStreetMap">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <span>Discover</span>
         </button>
         <button id="set-home-btn" class="btn btn-accent btn-sm" title="Set currently focused location as your Home address">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -62,7 +72,8 @@
         </button>
       </div>
 
-        <!-- Live Local Weather Header Pill -->
+      <!-- Live Weather & Navigation Controls Group -->
+      <div class="header-controls">
         <div id="weather-header-pill" class="weather-pill glass-pill hidden" title="Live Neighborhood Weather Forecast (Open-Meteo)">
           <span id="weather-icon">☀️</span>
           <span id="weather-temp">--°F</span>
@@ -467,6 +478,45 @@
             </svg>
             Save Key & Activate Map
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- OpenStreetMap POI Discovery Modal -->
+    <div id="poi-discovery-modal" class="modal-overlay hidden">
+      <div class="modal-card glass-panel" style="max-width: 620px;">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="modal-badge-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+            </span>
+            <div>
+              <h3>Discover Nearby Spots</h3>
+              <p class="modal-subtitle" id="poi-status-subtitle">Searching OpenStreetMap around current map focus...</p>
+            </div>
+          </div>
+          <button class="btn-close" id="close-poi-modal">&times;</button>
+        </div>
+
+        <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px; max-height: 65vh; overflow-y: auto;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+            <div class="filter-pills" id="poi-category-pills">
+              <button class="pill active" data-poi-filter="all">All</button>
+              <button class="pill" data-poi-filter="cafe">☕ Cafes</button>
+              <button class="pill" data-poi-filter="park">🌳 Parks</button>
+              <button class="pill" data-poi-filter="library">📚 Libraries</button>
+              <button class="pill" data-poi-filter="ev">🔌 EV Chargers</button>
+            </div>
+            <button id="import-all-pois-btn" class="btn btn-primary btn-sm hidden">
+              ⚡ Import All Matching (<span id="poi-count-num">0</span>)
+            </button>
+          </div>
+
+          <div id="poi-results-container" class="poi-results-list">
+            <!-- Dynamic POI card results rendered here -->
+          </div>
         </div>
       </div>
     </div>

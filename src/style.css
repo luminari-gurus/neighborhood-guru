@@ -148,9 +148,16 @@ body, html {
 .search-box-container {
   display: flex;
   align-items: center;
-  gap: 8px;
   flex: 1;
-  max-width: 460px;
+  min-width: 240px;
+  max-width: 380px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
 }
 
 .search-input-wrapper {
@@ -705,6 +712,51 @@ body, html {
 
 .btn-close:hover {
   color: white;
+}
+
+/* OpenStreetMap POI Discovery Styling */
+.poi-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.poi-item-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-glass);
+  transition: var(--transition-fast);
+}
+
+.poi-item-card:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--primary);
+}
+
+.poi-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.poi-name {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.poi-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
 }
 
 /* Modal Body & Forms */

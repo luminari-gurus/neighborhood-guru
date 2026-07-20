@@ -98,6 +98,16 @@ export class UIController {
       sunPlayBtn: document.getElementById('sun-play-btn'),
       sunNowBtn: document.getElementById('sun-now-btn'),
 
+      // OpenStreetMap POI Discovery Modal
+      discoverPoiBtn: document.getElementById('discover-poi-btn'),
+      poiDiscoveryModal: document.getElementById('poi-discovery-modal'),
+      closePoiModal: document.getElementById('close-poi-modal'),
+      poiStatusSubtitle: document.getElementById('poi-status-subtitle'),
+      poiCategoryPills: document.getElementById('poi-category-pills'),
+      importAllPoisBtn: document.getElementById('import-all-pois-btn'),
+      poiCountNum: document.getElementById('poi-count-num'),
+      poiResultsContainer: document.getElementById('poi-results-container'),
+
       // Toasts
       toastContainer: document.getElementById('toast-container'),
     };
@@ -148,6 +158,75 @@ export class UIController {
     if (h12 === 0) h12 = 12;
 
     return `${h12}:${padMins} ${ampm}`;
+  }
+
+  /**
+   * OpenStreetMap POI Discovery Modal Controls
+   */
+  openPoiModal() {
+    if (this.elements.poiDiscoveryModal) {
+      this.elements.poiDiscoveryModal.classList.remove('hidden');
+    }
+  }
+
+  closePoiModal() {
+    if (this.elements.poiDiscoveryModal) {
+      this.elements.poiDiscoveryModal.classList.add('hidden');
+    }
+  }
+
+  renderPoiResults(pois = [], onImportClick = null) {
+    const container = this.elements.poiResultsContainer;
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (this.elements.poiCountNum) {
+      this.elements.poiCountNum.textContent = pois.length;
+    }
+
+    if (this.elements.importAllPoisBtn) {
+      if (pois.length > 0) {
+        this.elements.importAllPoisBtn.classList.remove('hidden');
+      } else {
+        this.elements.importAllPoisBtn.classList.add('hidden');
+      }
+    }
+
+    if (pois.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <p>No new public spots found around this location. Try panning the map or selecting a different category!</p>
+        </div>
+      `;
+      return;
+    }
+
+    pois.forEach((poi) => {
+      const card = document.createElement('div');
+      card.className = 'poi-item-card';
+
+      card.innerHTML = `
+        <div class="poi-title-group">
+          <span class="poi-name">${this.escapeHtml(poi.name)}</span>
+          <div class="poi-meta">
+            <span style="color: ${poi.color || '#3b82f6'}; font-weight: 600;">${this.escapeHtml(poi.typeLabel)}</span>
+            ${poi.address ? `<span>📍 ${this.escapeHtml(poi.address)}</span>` : ''}
+          </div>
+        </div>
+        <button class="btn btn-secondary btn-sm btn-import-single" style="white-space: nowrap;">
+          + Import Spot
+        </button>
+      `;
+
+      card.querySelector('.btn-import-single').addEventListener('click', () => {
+        if (onImportClick) onImportClick(poi);
+        card.style.opacity = '0.5';
+        card.querySelector('.btn-import-single').textContent = '✓ Imported';
+        card.querySelector('.btn-import-single').disabled = true;
+      });
+
+      container.appendChild(card);
+    });
   }
 
   /**
