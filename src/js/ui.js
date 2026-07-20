@@ -22,8 +22,16 @@ export class UIController {
   }
 
   updateCategoryFields(category) {
+    const isVenue = category === 'venue';
+    if (this.elements.formJambaseContainer) {
+      if (isVenue) {
+        this.elements.formJambaseContainer.classList.remove('hidden');
+      } else {
+        this.elements.formJambaseContainer.classList.add('hidden');
+      }
+    }
     if (this.elements.formCapacityContainer) {
-      if (category === 'venue') {
+      if (isVenue) {
         this.elements.formCapacityContainer.classList.remove('hidden');
       } else {
         this.elements.formCapacityContainer.classList.add('hidden');
@@ -64,6 +72,7 @@ export class UIController {
       formLng: document.getElementById('form-lng'),
       formName: document.getElementById('form-name'),
       formCategory: document.getElementById('form-category'),
+      formJambaseContainer: document.getElementById('form-jambase-container'),
       formCapacityContainer: document.getElementById('form-capacity-container'),
       formCapacity: document.getElementById('form-capacity'),
       formJambaseId: document.getElementById('form-jambase-id'),
@@ -94,6 +103,7 @@ export class UIController {
       cancelSettingsBtn: document.getElementById('cancel-settings-btn'),
       saveSettingsBtn: document.getElementById('save-settings-btn'),
       settingsMapboxToken: document.getElementById('settings-mapbox-token'),
+      settingsJambaseToken: document.getElementById('settings-jambase-token'),
       currentHomeDisplay: document.getElementById('current-home-display'),
       clearHomeBtn: document.getElementById('clear-home-btn'),
 
@@ -808,8 +818,13 @@ export class UIController {
   /**
    * Settings Modal Controls
    */
-  openSettingsModal(token) {
-    this.elements.settingsMapboxToken.value = token || '';
+  openSettingsModal(mapboxToken, jambaseToken) {
+    if (this.elements.settingsMapboxToken) {
+      this.elements.settingsMapboxToken.value = mapboxToken || '';
+    }
+    if (this.elements.settingsJambaseToken) {
+      this.elements.settingsJambaseToken.value = jambaseToken || '';
+    }
     this.elements.settingsModal.classList.remove('hidden');
   }
 

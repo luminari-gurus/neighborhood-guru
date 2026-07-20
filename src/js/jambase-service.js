@@ -1,9 +1,7 @@
-/* ==========================================================================
-   JAMBASE SERVICE - VENUE SEARCH & CONCERT EVENTS LINKING
-   ========================================================================== */
+import { StorageService } from './storage.js';
 
 export class JamBaseService {
-  static CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 Hours TTL
+  static CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Hours TTL
 
   /**
    * Extract JamBase venue ID or slug from a raw ID or full JamBase URL
@@ -134,6 +132,37 @@ export class JamBaseService {
   }
 
   /**
+   * Fetch extra venue metadata (such as max capacity) from JamBase venue microdata or API
+   */
+  static async fetchVenueDetails(jambaseId) {
+    if (!jambaseId) return null;
+    const cleanId = this.extractVenueId(jambaseId);
+    if (!cleanId) return null;
+
+    try {
+      const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
+      const proxyUrls = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+      ];
+
+      for (const proxyUrl of proxyUrls) {
+        const res = await fetch(proxyUrl);
+        if (!res.ok) continue;
+
+        const htmlText = await res.text();
+        const capMatch = htmlText.match(/"maximumAttendeeCapacity"\s*:\s*"?(\d+)"?/i) || htmlText.match(/Capacity\s*:\s*([\d,]+)/i) || htmlText.match(/capacity"?\s*:\s*"?(\d+)"?/i);
+        if (capMatch && capMatch[1]) {
+          return { capacity: capMatch[1].replace(/,/g, '') };
+        }
+      }
+    } catch (e) {
+      console.warn('Venue details capacity lookup error:', e);
+    }
+    return null;
+  }
+
+  /**
    * Read cached shows from localStorage if within 4-hour TTL
    */
   static getCachedShows(cleanId) {
@@ -180,6 +209,69 @@ export class JamBaseService {
       }
     }
 
+    // 1. Query JamBase Data API v3 if API token is provided
+    const apiKey = StorageService.getJambaseToken();
+    if (apiKey) {
+      const cleanVenueName = cleanId.replace(/-/g, ' ');
+      const v3Endpoints = [
+        `https://corsproxy.io/?${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`)}`,
+        `https://corsproxy.io/?${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueId=jambase:${encodeURIComponent(cleanId)}`)}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`)}`,
+        `https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`,
+      ];
+
+      for (const apiUrl of v3Endpoints) {
+        try {
+          const res = await fetch(apiUrl, {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Accept': 'application/json',
+            }
+          });
+
+          if (res.ok) {
+            const text = await res.text();
+            const trimmed = text.trim();
+            if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
+
+            const data = JSON.parse(trimmed);
+            let rawEvents = Array.isArray(data) ? data : (data.events || data.records || data.data || null);
+
+            if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
+              const todayStr = new Date().toDateString();
+              const events = rawEvents.map(ev => {
+                const startDateStr = ev.startDate || ev.eventDate || ev.dateTime || ev.date;
+                const startDate = startDateStr ? new Date(startDateStr) : null;
+                const isToday = startDate ? startDate.toDateString() === todayStr : false;
+
+                let title = ev.name || ev.title || '';
+                if (!title && ev.performer) {
+                  title = Array.isArray(ev.performer) ? ev.performer.map(p => p.name || p).join(', ') : (ev.performer.name || ev.performer);
+                }
+                if (!title) title = 'Concert';
+
+                return {
+                  title: title,
+                  date: startDate ? startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' }) : '',
+                  time: startDate ? startDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+                  isToday: isToday,
+                  url: ev.url || ev.ticketUrl || `https://www.jambase.com/venue/${cleanId}`,
+                };
+              });
+
+              const finalShows = events.slice(0, 5);
+              console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
+              this.setCachedShows(cleanId, finalShows);
+              return finalShows;
+            }
+          }
+        } catch (err) {
+          console.warn('JamBase v3 API endpoint attempt error:', err);
+        }
+      }
+    }
+
+    // 2. Fallback to dual CORS proxy HTML scraper if no key is configured
     const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
     const proxyUrls = [
       `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,

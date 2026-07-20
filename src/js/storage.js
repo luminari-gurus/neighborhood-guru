@@ -4,6 +4,7 @@
 
 const STORAGE_KEYS = {
   MAPBOX_TOKEN: 'neighborhood_guru_mapbox_token',
+  JAMBASE_TOKEN: 'neighborhood_guru_jambase_token',
   HOME_ADDRESS: 'neighborhood_guru_home_address',
   SAVED_PLACES: 'neighborhood_guru_saved_places',
   MAP_STYLE: 'neighborhood_guru_map_style',
@@ -131,6 +132,17 @@ export const StorageService = {
 
   setMapboxToken(token) {
     localStorage.setItem(STORAGE_KEYS.MAPBOX_TOKEN, token.trim());
+  },
+
+  /**
+   * JamBase API Key / Token
+   */
+  getJambaseToken() {
+    return localStorage.getItem(STORAGE_KEYS.JAMBASE_TOKEN) || import.meta.env.VITE_JAMBASE_TOKEN || '';
+  },
+
+  setJambaseToken(token) {
+    localStorage.setItem(STORAGE_KEYS.JAMBASE_TOKEN, token.trim());
   },
 
   /**

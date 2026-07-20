@@ -226,8 +226,8 @@
               </select>
             </div>
 
-            <!-- JamBase Venue Integration Section -->
-            <div class="form-group full-width">
+            <!-- JamBase Venue Integration Section (Conditional for Venues) -->
+            <div class="form-group full-width hidden" id="form-jambase-container">
               <div class="section-label-header">
                 <label>JamBase Venue Link (Concerts & Shows)</label>
                 <span class="token-help-badge" style="font-size: 0.75rem; color: #a855f7;">🎸 JamBase ID</span>
@@ -248,7 +248,6 @@
             <div class="form-group full-width hidden" id="form-capacity-container">
               <label for="form-capacity">Venue Max Capacity (People)</label>
               <input type="number" id="form-capacity" placeholder="e.g. 500, 1200, 5000" min="1" step="1" />
-            </div>argin-top: 4px;"></div>
             </div>
 
             <!-- People Section -->
@@ -421,6 +420,11 @@
           <div class="form-group margin-top-md">
             <label for="settings-mapbox-token">Mapbox Access Token</label>
             <input type="password" id="settings-mapbox-token" placeholder="pk.eyJ1..." />
+          </div>
+
+          <div class="form-group margin-top-md">
+            <label for="settings-jambase-token">JamBase API Key <span style="font-weight: 400; color: #a855f7;">(Optional — for instant 50ms concert loading)</span></label>
+            <input type="password" id="settings-jambase-token" placeholder="Optional JamBase API key..." />
           </div>
 
           <div class="privacy-note">

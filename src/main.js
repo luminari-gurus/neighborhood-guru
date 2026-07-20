@@ -243,17 +243,19 @@ class NeighborhoodGuruApp {
 
     // --- Settings Modal Handlers ---
     el.openSettingsBtn.addEventListener('click', () => {
-      this.ui.openSettingsModal(this.storage.getMapboxToken());
+      this.ui.openSettingsModal(this.storage.getMapboxToken(), this.storage.getJambaseToken());
     });
 
     el.closeSettingsModal.addEventListener('click', () => this.ui.closeSettingsModal());
     el.cancelSettingsBtn.addEventListener('click', () => this.ui.closeSettingsModal());
 
     el.saveSettingsBtn.addEventListener('click', () => {
-      const token = el.settingsMapboxToken.value.trim();
+      const token = el.settingsMapboxToken ? el.settingsMapboxToken.value.trim() : '';
+      const jbToken = el.settingsJambaseToken ? el.settingsJambaseToken.value.trim() : '';
       this.storage.setMapboxToken(token);
+      this.storage.setJambaseToken(jbToken);
       this.ui.closeSettingsModal();
-      this.ui.showToast('Mapbox token saved. Reloading map...', 'success');
+      this.ui.showToast('Settings saved. Reloading map...', 'success');
       setTimeout(() => window.location.reload(), 1000);
     });
 
@@ -446,13 +448,27 @@ class NeighborhoodGuruApp {
           this.ui.elements.jambasePickerSubtitle.textContent = `Found ${matches.length} venue match${matches.length === 1 ? '' : 'es'} for "${query}"`;
         }
 
-        this.ui.renderJambaseSearchResults(matches, (selectedVenue) => {
+        this.ui.renderJambaseSearchResults(matches, async (selectedVenue) => {
           if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
+          
+          let capacity = selectedVenue.capacity;
+          if (!capacity) {
+            const details = await JamBaseService.fetchVenueDetails(selectedVenue.id);
+            if (details && details.capacity) {
+              capacity = details.capacity;
+            }
+          }
+
+          if (capacity && el.formCapacity) {
+            el.formCapacity.value = capacity;
+          }
+
           if (el.jambaseStatusMsg) {
             const locText = [selectedVenue.city, selectedVenue.state].filter(Boolean).join(', ');
-            el.jambaseStatusMsg.textContent = `✓ Linked to ${selectedVenue.name} ${locText ? `(${locText})` : ''}`;
+            const capText = capacity ? ` | Cap: ${capacity}` : '';
+            el.jambaseStatusMsg.textContent = `✓ Linked to ${selectedVenue.name} ${locText ? `(${locText})` : ''}${capText}`;
           }
-          this.ui.showToast(`Linked venue to ${selectedVenue.name}!`, 'success');
+          this.ui.showToast(`Linked venue to ${selectedVenue.name}${capacity ? ` (Cap: ${capacity})` : ''}!`, 'success');
         });
       });
     }
