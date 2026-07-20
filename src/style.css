@@ -677,7 +677,8 @@ body, html {
 }
 
 .people-list-container,
-.contact-methods-list {
+.contact-methods-list,
+.events-list-container {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -685,11 +686,13 @@ body, html {
 }
 
 .person-row,
-.contact-method-row {
+.contact-method-row,
+.event-row {
   display: flex;
   align-items: center;
   gap: 8px;
   animation: slideInRight 0.2s ease-out;
+  flex-wrap: wrap;
 }
 
 .person-name-input {
@@ -709,6 +712,53 @@ body, html {
 .contact-value-input {
   flex: 1;
   min-width: 120px;
+}
+
+.event-title-input {
+  flex: 1.2;
+  min-width: 140px;
+}
+
+.event-day-select {
+  width: 130px !important;
+  flex-shrink: 0;
+}
+
+.event-time-input {
+  width: 135px !important;
+  flex-shrink: 0;
+}
+
+.pill-event.active {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(239, 68, 68, 0.25)) !important;
+  border-color: #f59e0b !important;
+  color: #fbbf24 !important;
+  font-weight: 700;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.3);
+}
+
+.event-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.event-today-tag {
+  background: linear-gradient(135deg, #f59e0b, #ef4444) !important;
+  color: white !important;
+  font-weight: 700 !important;
+  padding: 2px 8px !important;
+  border-radius: var(--radius-full) !important;
+  font-size: 0.7rem !important;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+  animation: pulseWarning 2s infinite;
 }
 
 .btn-remove-row,

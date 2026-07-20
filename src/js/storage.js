@@ -20,6 +20,9 @@ const DEMO_PLACES = [
       { type: 'phone_work', label: 'Order Line', value: '(555) 345-6789' },
       { type: 'email_work', label: 'Catering Email', value: 'hello@oakstreetbakery.com' }
     ],
+    events: [
+      { title: "Farmer's Market & Fresh Bread", day: 'friday', time: '8:00 AM - 1:00 PM' }
+    ],
     address: '102 Oak Street',
     notes: 'Best sourdough and espresso in the neighborhood. Closed Mondays.',
     color: '#f59e0b',
@@ -37,6 +40,9 @@ const DEMO_PLACES = [
       { type: 'phone_home', label: 'House Landline', value: '(555) 987-1122' },
       { type: 'email_personal', label: 'Karen Email', value: 'millers742@gmail.com' }
     ],
+    events: [
+      { title: 'Trash & Recycling Pickup', day: 'tuesday', time: '7:00 AM' }
+    ],
     address: '742 Evergreen Terrace',
     notes: 'Friendly neighbors. Have spare house key & key to water shutoff.',
     color: '#10b981',
@@ -45,6 +51,45 @@ const DEMO_PLACES = [
     createdAt: Date.now() - 86400000 * 2,
   }
 ];
+
+const DAY_MAP = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+export function isEventHappeningToday(event) {
+  if (!event || !event.day) return false;
+  const today = new Date();
+  const currentDayNum = today.getDay(); // 0 = Sun, 1 = Mon, ..., 5 = Fri, 6 = Sat
+  
+  const targetDay = String(event.day).toLowerCase();
+  
+  if (targetDay === 'daily') return true;
+  if (targetDay === 'weekdays' && currentDayNum >= 1 && currentDayNum <= 5) return true;
+  if (targetDay === 'weekends' && (currentDayNum === 0 || currentDayNum === 6)) return true;
+  
+  if (DAY_MAP[targetDay] !== undefined && DAY_MAP[targetDay] === currentDayNum) {
+    return true;
+  }
+  
+  return false;
+}
+
+export function getPlaceEvents(place) {
+  if (place && Array.isArray(place.events)) {
+    return place.events.map(e => ({
+      title: e.title || '',
+      day: e.day || 'friday',
+      time: e.time || '',
+    }));
+  }
+  return [];
+}
 
 export function getPlacePeople(place) {
   if (place && Array.isArray(place.people)) {

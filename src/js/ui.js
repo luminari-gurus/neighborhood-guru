@@ -1,4 +1,4 @@
-import { getPlaceContacts, getPlacePeople } from './storage.js';
+import { getPlaceContacts, getPlacePeople, getPlaceEvents, isEventHappeningToday } from './storage.js';
 
 export class UIController {
   constructor() {
@@ -11,6 +11,7 @@ export class UIController {
     this.cacheElements();
     this.bindPeopleFieldEvents();
     this.bindContactFieldEvents();
+    this.bindEventFieldEvents();
   }
 
   cacheElements() {
@@ -50,6 +51,8 @@ export class UIController {
       peopleListContainer: document.getElementById('people-list-container'),
       addContactFieldBtn: document.getElementById('add-contact-field-btn'),
       contactMethodsContainer: document.getElementById('contact-methods-container'),
+      addEventFieldBtn: document.getElementById('add-event-field-btn'),
+      eventsListContainer: document.getElementById('events-list-container'),
       formAddress: document.getElementById('form-address'),
       formNotes: document.getElementById('form-notes'),
 
@@ -234,6 +237,75 @@ export class UIController {
   }
 
   /**
+   * Dynamic Events & Schedules Management
+   */
+  bindEventFieldEvents() {
+    if (this.elements.addEventFieldBtn) {
+      this.elements.addEventFieldBtn.addEventListener('click', () => {
+        this.addEventRow({ title: '', day: 'friday', time: '' });
+      });
+    }
+  }
+
+  renderEventFields(events = []) {
+    const container = this.elements.eventsListContainer;
+    if (!container) return;
+    container.innerHTML = '';
+
+    const list = Array.isArray(events) && events.length > 0 ? events : [];
+    list.forEach(e => this.addEventRow(e));
+  }
+
+  addEventRow(eventObj = { title: '', day: 'friday', time: '' }) {
+    const container = this.elements.eventsListContainer;
+    if (!container) return;
+
+    const row = document.createElement('div');
+    row.className = 'event-row';
+
+    const day = eventObj.day || 'friday';
+
+    row.innerHTML = `
+      <input type="text" class="event-title-input" placeholder="Event (e.g. Farmer's Market)" value="${this.escapeHtml(eventObj.title || '')}" />
+      <select class="event-day-select">
+        <option value="daily" ${day === 'daily' ? 'selected' : ''}>Every Day</option>
+        <option value="weekdays" ${day === 'weekdays' ? 'selected' : ''}>Weekdays</option>
+        <option value="weekends" ${day === 'weekends' ? 'selected' : ''}>Weekends</option>
+        <option value="monday" ${day === 'monday' ? 'selected' : ''}>Every Monday</option>
+        <option value="tuesday" ${day === 'tuesday' ? 'selected' : ''}>Every Tuesday</option>
+        <option value="wednesday" ${day === 'wednesday' ? 'selected' : ''}>Every Wednesday</option>
+        <option value="thursday" ${day === 'thursday' ? 'selected' : ''}>Every Thursday</option>
+        <option value="friday" ${day === 'friday' ? 'selected' : ''}>Every Friday</option>
+        <option value="saturday" ${day === 'saturday' ? 'selected' : ''}>Every Saturday</option>
+        <option value="sunday" ${day === 'sunday' ? 'selected' : ''}>Every Sunday</option>
+      </select>
+      <input type="text" class="event-time-input" placeholder="Time (e.g. 8am-1pm)" value="${this.escapeHtml(eventObj.time || '')}" />
+      <button type="button" class="btn-remove-row" title="Remove event">&times;</button>
+    `;
+
+    row.querySelector('.btn-remove-row').addEventListener('click', () => {
+      row.remove();
+    });
+
+    container.appendChild(row);
+  }
+
+  getEventFieldsData() {
+    if (!this.elements.eventsListContainer) return [];
+    const rows = this.elements.eventsListContainer.querySelectorAll('.event-row');
+    const events = [];
+    rows.forEach(row => {
+      const title = row.querySelector('.event-title-input').value.trim();
+      const day = row.querySelector('.event-day-select').value;
+      const time = row.querySelector('.event-time-input').value.trim();
+      if (title) {
+        events.push({ title, day, time });
+      }
+    });
+    return events;
+  }
+
+  /**
    * Location Editor Modal Controls
    */
   openLocationModal(data = {}) {
@@ -256,6 +328,10 @@ export class UIController {
     // Populate dynamic contact fields with custom labels
     const contacts = getPlaceContacts(data);
     this.renderContactFields(contacts);
+
+    // Populate dynamic Recurring Event fields
+    const events = getPlaceEvents(data);
+    this.renderEventFields(events);
 
     this.elements.formAddress.value = data.address || '';
     this.elements.formNotes.value = data.notes || '';
@@ -301,7 +377,18 @@ export class UIController {
 
     // Apply Filter & Search Query
     const filtered = places.filter((p) => {
-      const matchesCategory = this.currentFilter === 'all' || p.category === this.currentFilter;
+      const eventsList = getPlaceEvents(p);
+      const isToday = eventsList.some(isEventHappeningToday);
+
+      let matchesCategory = false;
+      if (this.currentFilter === 'all') {
+        matchesCategory = true;
+      } else if (this.currentFilter === 'today') {
+        matchesCategory = isToday;
+      } else {
+        matchesCategory = p.category === this.currentFilter;
+      }
+
       const q = this.searchQuery.toLowerCase();
       const peopleList = getPlacePeople(p);
       const contactList = getPlaceContacts(p);
@@ -311,6 +398,7 @@ export class UIController {
         (p.name && p.name.toLowerCase().includes(q)) ||
         peopleList.some(person => person.toLowerCase().includes(q)) ||
         contactList.some(c => (c.value && c.value.toLowerCase().includes(q)) || (c.label && c.label.toLowerCase().includes(q))) ||
+        eventsList.some(e => (e.title && e.title.toLowerCase().includes(q)) || (e.day && e.day.toLowerCase().includes(q))) ||
         (p.notes && p.notes.toLowerCase().includes(q));
 
       return matchesCategory && matchesSearch;
@@ -335,10 +423,27 @@ export class UIController {
 
       const people = getPlacePeople(place);
       const contacts = getPlaceContacts(place);
+      const events = getPlaceEvents(place);
 
       let peopleHtml = '';
       if (people.length > 0) {
         peopleHtml = `<div class="contact-row">👥 <strong style="font-size: 0.75rem; color: #94a3b8;">People:</strong> ${people.map(p => this.escapeHtml(p)).join(', ')}</div>`;
+      }
+
+      let eventsHtml = '';
+      if (events.length > 0) {
+        events.forEach(e => {
+          const activeToday = isEventHappeningToday(e);
+          const dayLabel = e.day.charAt(0).toUpperCase() + e.day.slice(1);
+          eventsHtml += `
+            <div class="contact-row" style="align-items: center; gap: 6px; margin-top: 2px;">
+              <span class="event-badge ${activeToday ? 'event-today-tag' : ''}">
+                ${activeToday ? '🔥 TODAY' : '📅'} ${this.escapeHtml(e.title)}
+              </span>
+              <span style="font-size: 0.74rem; color: #94a3b8;">${dayLabel}${e.time ? ` (${this.escapeHtml(e.time)})` : ''}</span>
+            </div>
+          `;
+        });
       }
 
       let contactsHtml = '';
@@ -376,6 +481,7 @@ export class UIController {
           </span>
         </div>
         ${peopleHtml}
+        ${eventsHtml}
         ${contactsHtml}
         ${place.address ? `<div class="contact-row">📍 ${this.escapeHtml(place.address)}</div>` : ''}
         

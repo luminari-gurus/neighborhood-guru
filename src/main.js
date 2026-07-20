@@ -460,6 +460,7 @@ class NeighborhoodGuruApp {
     const existingId = el.formLocationId.value.trim();
     const people = this.ui.getPeopleFieldsData();
     const contacts = this.ui.getContactFieldsData();
+    const events = this.ui.getEventFieldsData();
 
     const placeData = {
       id: existingId ? existingId : undefined,
@@ -469,6 +470,7 @@ class NeighborhoodGuruApp {
       category: el.formCategory.value,
       people: people,
       contacts: contacts,
+      events: events,
       address: el.formAddress.value.trim(),
       notes: el.formNotes.value.trim(),
       color: colorRadio ? colorRadio.value : '#3b82f6',

@@ -3,7 +3,7 @@
    ========================================================================== */
 
 import mapboxgl from 'mapbox-gl';
-import { getPlaceContacts, getPlacePeople } from './storage.js';
+import { getPlaceContacts, getPlacePeople, getPlaceEvents, isEventHappeningToday } from './storage.js';
 
 const STYLES = {
   streets: 'mapbox://styles/mapbox/streets-v12',
@@ -420,6 +420,7 @@ export class MapboxService {
 
       const people = getPlacePeople(place);
       const contacts = getPlaceContacts(place);
+      const events = getPlaceEvents(place);
 
       let popupContactsHtml = '';
       contacts.forEach(c => {
@@ -440,6 +441,15 @@ export class MapboxService {
         peoplePopupHtml = `<p style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 2px;">👥 ${people.join(', ')}</p>`;
       }
 
+      let eventsPopupHtml = '';
+      if (events.length > 0) {
+        events.forEach(e => {
+          const activeToday = isEventHappeningToday(e);
+          const dayLabel = e.day.charAt(0).toUpperCase() + e.day.slice(1);
+          eventsPopupHtml += `<p style="font-size: 0.76rem; color: ${activeToday ? '#fbbf24' : '#60a5fa'}; margin-top: 4px; font-weight: ${activeToday ? '700' : '500'};">${activeToday ? '🔥 TODAY: ' : '📅 '}${e.title} (${dayLabel}${e.time ? ` ${e.time}` : ''})</p>`;
+        });
+      }
+
       // Popup Content
       const popupHtml = `
         <div class="marker-popup-card">
@@ -448,6 +458,7 @@ export class MapboxService {
             <strong style="font-size: 0.95rem;">${place.name}</strong>
           </div>
           ${peoplePopupHtml}
+          ${eventsPopupHtml}
           ${popupContactsHtml}
           ${place.notes ? `<p style="font-size: 0.78rem; color: #cbd5e1; margin-top: 6px; font-style: italic;">"${place.notes.substring(0, 70)}${place.notes.length > 70 ? '...' : ''}"</p>` : ''}
           <button class="btn btn-primary btn-sm popup-edit-btn" data-id="${place.id}" style="margin-top: 10px; width: 100%; font-size: 0.75rem; padding: 4px;">View & Edit Details</button>

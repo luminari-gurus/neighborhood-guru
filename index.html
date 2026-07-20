@@ -219,6 +219,22 @@
               </div>
             </div>
 
+            <!-- Recurring Events & Schedules Section -->
+            <div class="form-group full-width">
+              <div class="section-label-header">
+                <label>Recurring Events & Schedules</label>
+                <button type="button" id="add-event-field-btn" class="btn btn-secondary btn-sm">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  <span>Add Event / Schedule</span>
+                </button>
+              </div>
+              <div id="events-list-container" class="events-list-container">
+                <!-- Dynamic event rows rendered here -->
+              </div>
+            </div>
+
             <div class="form-group full-width">
               <label for="form-address">Street Address / Unit</label>
               <input type="text" id="form-address" placeholder="e.g. 742 Evergreen Terrace" />
@@ -293,6 +309,7 @@
       <!-- Filter Category Pills -->
       <div class="filter-pills" id="sidebar-filter-pills">
         <button class="pill active" data-filter="all">All</button>
+        <button class="pill pill-event" data-filter="today">📅 Happening Today</button>
         <button class="pill" data-filter="neighbor">Neighbors</button>
         <button class="pill" data-filter="service">Services</button>
         <button class="pill" data-filter="favorite">Favorites</button>
