@@ -3,7 +3,7 @@
    ========================================================================== */
 
 import mapboxgl from 'mapbox-gl';
-import { normalizePlaceContacts } from './storage.js';
+import { getPlaceContacts, getPlacePeople } from './storage.js';
 
 const STYLES = {
   streets: 'mapbox://styles/mapbox/streets-v12',
@@ -21,6 +21,7 @@ export class MapboxService {
     this.tempClickMarker = null;
     this.currentToken = '';
     this.currentStyle = 'streets';
+    this.is3DActive = true;
   }
 
   /**
@@ -32,61 +33,79 @@ export class MapboxService {
       homeAddress = null,
       preferredStyle = 'streets',
       onMapClick = null,
-      onMarkerClick = null,
+      onTokenError = null,
     } = options;
 
     this.currentToken = token.trim() || DEFAULT_TOKEN;
-    mapboxgl.accessToken = this.currentToken;
 
-    this.currentStyle = preferredStyle;
-    const initialStyle = STYLES[preferredStyle] || STYLES.streets;
-
-    // Determine initial camera view & projection mode
-    const hasHome = homeAddress && typeof homeAddress.lat === 'number' && typeof homeAddress.lng === 'number';
-
-    const mapOptions = {
-      container: containerId,
-      style: initialStyle,
-      projection: 'globe', // Natively enables 3D Earth Globe view when zoomed out
-      center: hasHome ? [homeAddress.lng, homeAddress.lat] : [0, 20],
-      zoom: hasHome ? 15.5 : 1.5,
-      pitch: hasHome ? 35 : 0,
-      bearing: hasHome ? -10 : 0,
-      attributionControl: true,
-    };
-
-    this.map = new mapboxgl.Map(mapOptions);
-
-    // Add navigation controls (Zoom, pitch, compass)
-    this.map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'bottom-right');
-
-    // Add scale control
-    this.map.addControl(new mapboxgl.ScaleControl({ unit: 'imperial' }), 'bottom-left');
-
-    this.map.on('load', () => {
-      // Set atmospheric glow & starry night sky for globe projection
-      this.setupGlobeEnvironment();
-
-      if (hasHome) {
-        this.renderHomeMarker(homeAddress);
-      }
-    });
-
-    // Handle map click event to capture coordinates for adding a location
-    if (onMapClick) {
-      this.map.on('click', (e) => {
-        // Prevent trigger if clicking on a marker popup
-        if (e.originalEvent.target.closest('.mapboxgl-popup') || e.originalEvent.target.closest('.custom-map-marker')) {
-          return;
-        }
-
-        const coords = { lat: e.lngLat.lat, lng: e.lngLat.lng };
-        this.showTempMarker(coords);
-        onMapClick(coords);
-      });
+    if (!this.currentToken) {
+      console.warn('No Mapbox access token provided.');
+      if (onTokenError) onTokenError();
+      return null;
     }
 
-    return this.map;
+    try {
+      mapboxgl.accessToken = this.currentToken;
+      this.currentStyle = preferredStyle;
+      const initialStyle = STYLES[preferredStyle] || STYLES.streets;
+
+      const hasHome = homeAddress && typeof homeAddress.lat === 'number' && typeof homeAddress.lng === 'number';
+
+      const mapOptions = {
+        container: containerId,
+        style: initialStyle,
+        projection: 'globe',
+        center: hasHome ? [homeAddress.lng, homeAddress.lat] : [0, 20],
+        zoom: hasHome ? 15.5 : 1.5,
+        pitch: hasHome ? 45 : 0,
+        bearing: hasHome ? -10 : 0,
+        attributionControl: true,
+      };
+
+      this.map = new mapboxgl.Map(mapOptions);
+
+      // Listen for Mapbox token authorization errors or tile load failures
+      this.map.on('error', (e) => {
+        if (e && e.error) {
+          const status = e.error.status;
+          const msg = String(e.error.message || '');
+          if (status === 401 || status === 403 || msg.includes('accessToken') || msg.includes('Unauthorized')) {
+            console.warn('Mapbox Token Error:', e.error);
+            if (onTokenError) onTokenError(e.error);
+          }
+        }
+      });
+
+      // Add navigation controls
+      this.map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+
+      // Add scale control
+      this.map.addControl(new mapboxgl.ScaleControl({ unit: 'imperial' }), 'bottom-left');
+
+      this.map.on('load', () => {
+        this.setup3DFeatures();
+        if (hasHome) {
+          this.renderHomeMarker(homeAddress);
+        }
+      });
+
+      if (onMapClick) {
+        this.map.on('click', (e) => {
+          if (e.originalEvent.target.closest('.mapboxgl-popup') || e.originalEvent.target.closest('.custom-map-marker')) {
+            return;
+          }
+          const coords = { lat: e.lngLat.lat, lng: e.lngLat.lng };
+          this.showTempMarker(coords);
+          onMapClick(coords);
+        });
+      }
+
+      return this.map;
+    } catch (err) {
+      console.error('Failed to initialize Mapbox map:', err);
+      if (onTokenError) onTokenError(err);
+      return null;
+    }
   }
 
   /**
@@ -107,6 +126,124 @@ export class MapboxService {
   }
 
   /**
+   * Add 3D Terrain DEM & 3D Extruded Buildings Layer
+   */
+  setup3DFeatures() {
+    if (!this.map) return;
+
+    // 1. Atmospheric Sky & Fog
+    this.setupGlobeEnvironment();
+
+    // 2. Add 3D Terrain DEM Source & Elevation
+    try {
+      if (!this.map.getSource('mapbox-dem')) {
+        this.map.addSource('mapbox-dem', {
+          type: 'raster-dem',
+          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+          tileSize: 512,
+          maxzoom: 14,
+        });
+      }
+      if (this.is3DActive) {
+        this.map.setTerrain({ source: 'mapbox-dem', exaggeration: 1.5 });
+      }
+    } catch (err) {
+      console.warn('Could not load Mapbox 3D Terrain source:', err);
+    }
+
+    // 3. Add 3D Building Extrusions Layer
+    try {
+      if (this.map.getLayer('add-3d-buildings')) {
+        this.map.setLayoutProperty('add-3d-buildings', 'visibility', this.is3DActive ? 'visible' : 'none');
+        return;
+      }
+
+      const layers = this.map.getStyle().layers;
+      let labelLayerId;
+      for (let i = 0; i < layers.length; i++) {
+        if (layers[i].type === 'symbol' && layers[i].layout && layers[i].layout['text-field']) {
+          labelLayerId = layers[i].id;
+          break;
+        }
+      }
+
+      this.map.addLayer(
+        {
+          id: 'add-3d-buildings',
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['==', 'extrude', 'true'],
+          type: 'fill-extrusion',
+          minzoom: 14,
+          layout: {
+            visibility: this.is3DActive ? 'visible' : 'none',
+          },
+          paint: {
+            'fill-extrusion-color': '#334155',
+            'fill-extrusion-height': [
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              14,
+              0,
+              14.5,
+              ['get', 'height']
+            ],
+            'fill-extrusion-base': [
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              14,
+              0,
+              14.5,
+              ['get', 'min_height']
+            ],
+            'fill-extrusion-opacity': 0.85
+          }
+        },
+        labelLayerId
+      );
+    } catch (err) {
+      console.warn('Could not add 3D building extrusions:', err);
+    }
+  }
+
+  /**
+   * Toggle 3D Buildings & Terrain Elevation ON / OFF
+   */
+  toggle3DMode(enable = null) {
+    if (typeof enable === 'boolean') {
+      this.is3DActive = enable;
+    } else {
+      this.is3DActive = !this.is3DActive;
+    }
+
+    if (!this.map) return this.is3DActive;
+
+    try {
+      if (this.is3DActive) {
+        if (this.map.getSource('mapbox-dem')) {
+          this.map.setTerrain({ source: 'mapbox-dem', exaggeration: 1.5 });
+        }
+        if (this.map.getLayer('add-3d-buildings')) {
+          this.map.setLayoutProperty('add-3d-buildings', 'visibility', 'visible');
+        }
+        this.map.easeTo({ pitch: 55, duration: 1000 });
+      } else {
+        this.map.setTerrain(null);
+        if (this.map.getLayer('add-3d-buildings')) {
+          this.map.setLayoutProperty('add-3d-buildings', 'visibility', 'none');
+        }
+        this.map.easeTo({ pitch: 0, duration: 1000 });
+      }
+    } catch (err) {
+      console.warn('Error toggling 3D mode:', err);
+    }
+
+    return this.is3DActive;
+  }
+
+  /**
    * Switch between Streets and Satellite map styles
    */
   setStyle(styleName) {
@@ -115,9 +252,9 @@ export class MapboxService {
 
     this.map.setStyle(STYLES[styleName]);
 
-    // Re-apply fog and markers after style load finishes
+    // Re-apply 3D features and markers after style load finishes
     this.map.once('style.load', () => {
-      this.setupGlobeEnvironment();
+      this.setup3DFeatures();
     });
   }
 
@@ -281,14 +418,27 @@ export class MapboxService {
       const iconSvg = this.getCategoryIconSvg(place.category);
       el.innerHTML = iconSvg;
 
-      const contacts = normalizePlaceContacts(place);
+      const people = getPlacePeople(place);
+      const contacts = getPlaceContacts(place);
+
       let popupContactsHtml = '';
       contacts.forEach(c => {
         const isEmail = c.type.startsWith('email');
         const icon = isEmail ? '✉️' : '📞';
         const link = isEmail ? `mailto:${c.value}` : `tel:${c.value}`;
-        popupContactsHtml += `<p style="font-size: 0.8rem; margin-top: 2px;">${icon} <a href="${link}" style="color: #3b82f6; text-decoration: none;">${c.value}</a></p>`;
+        let defaultLabel = isEmail ? 'Email' : 'Phone';
+        if (c.type === 'phone_mobile') defaultLabel = 'Mobile';
+        else if (c.type === 'phone_home') defaultLabel = 'Home';
+        else if (c.type === 'phone_work') defaultLabel = 'Work';
+
+        const displayLabel = c.label ? c.label : defaultLabel;
+        popupContactsHtml += `<p style="font-size: 0.8rem; margin-top: 2px;">${icon} <strong style="color: #94a3b8;">${displayLabel}:</strong> <a href="${link}" style="color: #3b82f6; text-decoration: none;">${c.value}</a></p>`;
       });
+
+      let peoplePopupHtml = '';
+      if (people.length > 0) {
+        peoplePopupHtml = `<p style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 2px;">👥 ${people.join(', ')}</p>`;
+      }
 
       // Popup Content
       const popupHtml = `
@@ -297,7 +447,7 @@ export class MapboxService {
             <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: ${place.color || '#3b82f6'};"></span>
             <strong style="font-size: 0.95rem;">${place.name}</strong>
           </div>
-          ${place.contactName ? `<p style="font-size: 0.8rem; color: #94a3b8;">👤 ${place.contactName}</p>` : ''}
+          ${peoplePopupHtml}
           ${popupContactsHtml}
           ${place.notes ? `<p style="font-size: 0.78rem; color: #cbd5e1; margin-top: 6px; font-style: italic;">"${place.notes.substring(0, 70)}${place.notes.length > 70 ? '...' : ''}"</p>` : ''}
           <button class="btn btn-primary btn-sm popup-edit-btn" data-id="${place.id}" style="margin-top: 10px; width: 100%; font-size: 0.75rem; padding: 4px;">View & Edit Details</button>

@@ -15,10 +15,10 @@ const DEMO_PLACES = [
     id: 'demo-1',
     name: 'Oak Street Bakery & Cafe',
     category: 'favorite',
-    contactName: 'Chef Elena',
+    people: ['Chef Elena'],
     contacts: [
-      { type: 'phone_work', label: 'Work Phone', value: '(555) 345-6789' },
-      { type: 'email_work', label: 'Email', value: 'hello@oakstreetbakery.com' }
+      { type: 'phone_work', label: 'Order Line', value: '(555) 345-6789' },
+      { type: 'email_work', label: 'Catering Email', value: 'hello@oakstreetbakery.com' }
     ],
     address: '102 Oak Street',
     notes: 'Best sourdough and espresso in the neighborhood. Closed Mondays.',
@@ -31,11 +31,11 @@ const DEMO_PLACES = [
     id: 'demo-2',
     name: 'The Millers (Neighbors)',
     category: 'neighbor',
-    contactName: 'Bob & Karen Miller',
+    people: ['Bob Miller', 'Karen Miller'],
     contacts: [
-      { type: 'phone_mobile', label: 'Mobile (Bob)', value: '(555) 987-6543' },
-      { type: 'phone_home', label: 'Home Phone', value: '(555) 987-1122' },
-      { type: 'email_personal', label: 'Email', value: 'millers742@gmail.com' }
+      { type: 'phone_mobile', label: 'Bob Cell', value: '(555) 987-6543' },
+      { type: 'phone_home', label: 'House Landline', value: '(555) 987-1122' },
+      { type: 'email_personal', label: 'Karen Email', value: 'millers742@gmail.com' }
     ],
     address: '742 Evergreen Terrace',
     notes: 'Friendly neighbors. Have spare house key & key to water shutoff.',
@@ -46,19 +46,34 @@ const DEMO_PLACES = [
   }
 ];
 
-export function normalizePlaceContacts(place) {
-  if (!place) return [];
-  if (Array.isArray(place.contacts) && place.contacts.length > 0) {
-    return place.contacts;
+export function getPlacePeople(place) {
+  if (place && Array.isArray(place.people)) {
+    return place.people.filter(p => p && typeof p === 'string' && p.trim() !== '');
   }
-  const contacts = [];
-  if (place.phone) {
-    contacts.push({ type: 'phone_mobile', label: 'Mobile', value: place.phone });
+  return [];
+}
+
+export function getPlaceContacts(place) {
+  if (place && Array.isArray(place.contacts)) {
+    return place.contacts.map(c => ({
+      type: c.type || 'phone_mobile',
+      label: c.label || '',
+      value: c.value || '',
+    }));
   }
-  if (place.email) {
-    contacts.push({ type: 'email_personal', label: 'Email', value: place.email });
-  }
-  return contacts;
+  return [];
+}
+
+function isModernPlace(place) {
+  return (
+    place &&
+    typeof place === 'object' &&
+    Array.isArray(place.people) &&
+    Array.isArray(place.contacts) &&
+    !('contactName' in place) &&
+    !('phone' in place) &&
+    !('email' in place)
+  );
 }
 
 export const StorageService = {
@@ -95,11 +110,25 @@ export const StorageService = {
   getSavedPlaces() {
     const raw = localStorage.getItem(STORAGE_KEYS.SAVED_PLACES);
     if (!raw) {
-      // Seed initial demo data for first time users
       localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(DEMO_PLACES));
       return DEMO_PLACES;
     }
-    return JSON.parse(raw);
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return DEMO_PLACES;
+      
+      const validModern = parsed.filter(isModernPlace);
+      
+      // Purge any legacy items from localStorage
+      if (validModern.length !== parsed.length) {
+        const finalPlaces = validModern.length > 0 ? validModern : DEMO_PLACES;
+        localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(finalPlaces));
+        return finalPlaces;
+      }
+      return validModern;
+    } catch (e) {
+      return DEMO_PLACES;
+    }
   },
 
   savePlace(place) {

@@ -1,8 +1,4 @@
-/* ==========================================================================
-   UI CONTROLLER - MODALS, DRAWER, FORMS, FILTERS & TOAST NOTIFICATIONS
-   ========================================================================== */
-
-import { normalizePlaceContacts } from './storage.js';
+import { getPlaceContacts, getPlacePeople } from './storage.js';
 
 export class UIController {
   constructor() {
@@ -13,6 +9,7 @@ export class UIController {
 
   init() {
     this.cacheElements();
+    this.bindPeopleFieldEvents();
     this.bindContactFieldEvents();
   }
 
@@ -27,6 +24,7 @@ export class UIController {
       flyHomeBtn: document.getElementById('fly-home-btn'),
       flyGlobeBtn: document.getElementById('fly-globe-btn'),
       styleSwitcher: document.getElementById('style-switcher'),
+      toggle3dBtn: document.getElementById('toggle-3d-btn'),
       toggleSidebarBtn: document.getElementById('toggle-sidebar-btn'),
       placesCountBadge: document.getElementById('places-count-badge'),
       openSettingsBtn: document.getElementById('open-settings-btn'),
@@ -48,7 +46,8 @@ export class UIController {
       formLng: document.getElementById('form-lng'),
       formName: document.getElementById('form-name'),
       formCategory: document.getElementById('form-category'),
-      formContactName: document.getElementById('form-contact-name'),
+      addPersonFieldBtn: document.getElementById('add-person-field-btn'),
+      peopleListContainer: document.getElementById('people-list-container'),
       addContactFieldBtn: document.getElementById('add-contact-field-btn'),
       contactMethodsContainer: document.getElementById('contact-methods-container'),
       formAddress: document.getElementById('form-address'),
@@ -72,6 +71,16 @@ export class UIController {
       settingsMapboxToken: document.getElementById('settings-mapbox-token'),
       currentHomeDisplay: document.getElementById('current-home-display'),
       clearHomeBtn: document.getElementById('clear-home-btn'),
+
+      // Key Prompt Modal & Warning Banner
+      keyPromptModal: document.getElementById('key-prompt-modal'),
+      closeKeyPromptModal: document.getElementById('close-key-prompt-modal'),
+      dismissKeyPromptBtn: document.getElementById('dismiss-key-prompt-btn'),
+      saveKeyPromptBtn: document.getElementById('save-key-prompt-btn'),
+      promptMapboxToken: document.getElementById('prompt-mapbox-token'),
+      keyWarningBanner: document.getElementById('key-warning-banner'),
+      bannerOpenKeyModalBtn: document.getElementById('banner-open-key-modal-btn'),
+      keyWarningDot: document.getElementById('key-warning-dot'),
 
       // Toasts
       toastContainer: document.getElementById('toast-container'),
@@ -97,12 +106,64 @@ export class UIController {
   }
 
   /**
+   * Dynamic People Management
+   */
+  bindPeopleFieldEvents() {
+    if (this.elements.addPersonFieldBtn) {
+      this.elements.addPersonFieldBtn.addEventListener('click', () => {
+        this.addPersonRow('');
+      });
+    }
+  }
+
+  renderPeopleFields(people = []) {
+    const container = this.elements.peopleListContainer;
+    if (!container) return;
+    container.innerHTML = '';
+
+    const list = Array.isArray(people) && people.length > 0 ? people : [''];
+    list.forEach(p => this.addPersonRow(p || ''));
+  }
+
+  addPersonRow(name = '') {
+    const container = this.elements.peopleListContainer;
+    if (!container) return;
+
+    const row = document.createElement('div');
+    row.className = 'person-row';
+
+    row.innerHTML = `
+      <input type="text" class="person-name-input" placeholder="e.g. Sarah, John, Vickie" value="${this.escapeHtml(name)}" />
+      <button type="button" class="btn-remove-row" title="Remove person">&times;</button>
+    `;
+
+    row.querySelector('.btn-remove-row').addEventListener('click', () => {
+      row.remove();
+    });
+
+    container.appendChild(row);
+  }
+
+  getPeopleFieldsData() {
+    if (!this.elements.peopleListContainer) return [];
+    const rows = this.elements.peopleListContainer.querySelectorAll('.person-row');
+    const people = [];
+    rows.forEach(row => {
+      const val = row.querySelector('.person-name-input').value.trim();
+      if (val) {
+        people.push(val);
+      }
+    });
+    return people;
+  }
+
+  /**
    * Dynamic Contact Fields Management
    */
   bindContactFieldEvents() {
     if (this.elements.addContactFieldBtn) {
       this.elements.addContactFieldBtn.addEventListener('click', () => {
-        this.addContactRow('phone_mobile', '');
+        this.addContactRow('phone_mobile', '', '');
       });
     }
   }
@@ -112,11 +173,11 @@ export class UIController {
     if (!container) return;
     container.innerHTML = '';
 
-    const list = Array.isArray(contacts) && contacts.length > 0 ? contacts : [{ type: 'phone_mobile', value: '' }];
-    list.forEach(c => this.addContactRow(c.type || 'phone_mobile', c.value || ''));
+    const list = Array.isArray(contacts) && contacts.length > 0 ? contacts : [{ type: 'phone_mobile', label: '', value: '' }];
+    list.forEach(c => this.addContactRow(c.type || 'phone_mobile', c.label || '', c.value || ''));
   }
 
-  addContactRow(type = 'phone_mobile', value = '') {
+  addContactRow(type = 'phone_mobile', label = '', value = '') {
     const container = this.elements.contactMethodsContainer;
     if (!container) return;
 
@@ -130,26 +191,27 @@ export class UIController {
         <option value="phone_mobile" ${type === 'phone_mobile' ? 'selected' : ''}>📱 Mobile</option>
         <option value="phone_home" ${type === 'phone_home' ? 'selected' : ''}>📞 Home Phone</option>
         <option value="phone_work" ${type === 'phone_work' ? 'selected' : ''}>💼 Work Phone</option>
-        <option value="email_personal" ${type === 'email_personal' ? 'selected' : ''}>✉️ Email (Personal)</option>
-        <option value="email_work" ${type === 'email_work' ? 'selected' : ''}>🏢 Email (Work)</option>
+        <option value="email_personal" ${type === 'email_personal' ? 'selected' : ''}>✉️ Personal Email</option>
+        <option value="email_work" ${type === 'email_work' ? 'selected' : ''}>🏢 Work Email</option>
         <option value="other" ${type === 'other' ? 'selected' : ''}>📌 Other Contact</option>
       </select>
+      <input type="text" class="contact-label-input" placeholder="Label (e.g. Vickie cell)" value="${this.escapeHtml(label)}" />
       <input type="text" class="contact-value-input" placeholder="${isEmail ? 'e.g. name@example.com' : 'e.g. (555) 000-0000'}" value="${this.escapeHtml(value)}" />
-      <button type="button" class="btn-remove-contact" title="Remove method">&times;</button>
+      <button type="button" class="btn-remove-row" title="Remove method">&times;</button>
     `;
 
     const select = row.querySelector('.contact-type-select');
-    const input = row.querySelector('.contact-value-input');
+    const valueInput = row.querySelector('.contact-value-input');
     select.addEventListener('change', () => {
       const selectedType = select.value;
       if (selectedType.startsWith('email')) {
-        input.placeholder = 'e.g. name@example.com';
+        valueInput.placeholder = 'e.g. name@example.com';
       } else {
-        input.placeholder = 'e.g. (555) 000-0000';
+        valueInput.placeholder = 'e.g. (555) 000-0000';
       }
     });
 
-    row.querySelector('.btn-remove-contact').addEventListener('click', () => {
+    row.querySelector('.btn-remove-row').addEventListener('click', () => {
       row.remove();
     });
 
@@ -162,9 +224,10 @@ export class UIController {
     const contacts = [];
     rows.forEach(row => {
       const type = row.querySelector('.contact-type-select').value;
+      const label = row.querySelector('.contact-label-input').value.trim();
       const value = row.querySelector('.contact-value-input').value.trim();
-      if (value) {
-        contacts.push({ type, value });
+      if (value || label) {
+        contacts.push({ type, label, value });
       }
     });
     return contacts;
@@ -185,10 +248,13 @@ export class UIController {
     this.elements.locationModalCoords.textContent = `Coordinates: ${Number(data.lat).toFixed(5)}, ${Number(data.lng).toFixed(5)}`;
     this.elements.formName.value = data.name || '';
     this.elements.formCategory.value = data.category || 'neighbor';
-    this.elements.formContactName.value = data.contactName || '';
 
-    // Populate dynamic contact fields (phones & emails)
-    const contacts = normalizePlaceContacts(data);
+    // Populate dynamic People fields
+    const people = getPlacePeople(data);
+    this.renderPeopleFields(people);
+
+    // Populate dynamic contact fields with custom labels
+    const contacts = getPlaceContacts(data);
     this.renderContactFields(contacts);
 
     this.elements.formAddress.value = data.address || '';
@@ -237,11 +303,14 @@ export class UIController {
     const filtered = places.filter((p) => {
       const matchesCategory = this.currentFilter === 'all' || p.category === this.currentFilter;
       const q = this.searchQuery.toLowerCase();
+      const peopleList = getPlacePeople(p);
+      const contactList = getPlaceContacts(p);
+
       const matchesSearch =
         !q ||
         (p.name && p.name.toLowerCase().includes(q)) ||
-        (p.contactName && p.contactName.toLowerCase().includes(q)) ||
-        (p.phone && p.phone.includes(q)) ||
+        peopleList.some(person => person.toLowerCase().includes(q)) ||
+        contactList.some(c => (c.value && c.value.toLowerCase().includes(q)) || (c.label && c.label.toLowerCase().includes(q))) ||
         (p.notes && p.notes.toLowerCase().includes(q));
 
       return matchesCategory && matchesSearch;
@@ -264,7 +333,13 @@ export class UIController {
       card.className = 'place-card';
       card.dataset.id = place.id;
 
-      const contacts = normalizePlaceContacts(place);
+      const people = getPlacePeople(place);
+      const contacts = getPlaceContacts(place);
+
+      let peopleHtml = '';
+      if (people.length > 0) {
+        peopleHtml = `<div class="contact-row">👥 <strong style="font-size: 0.75rem; color: #94a3b8;">People:</strong> ${people.map(p => this.escapeHtml(p)).join(', ')}</div>`;
+      }
 
       let contactsHtml = '';
       let actionButtonsHtml = '';
@@ -272,19 +347,21 @@ export class UIController {
       contacts.forEach((c) => {
         const isEmail = c.type.startsWith('email');
         const icon = isEmail ? '✉️' : '📞';
-        let label = 'Contact';
-        if (c.type === 'phone_mobile') label = 'Mobile';
-        else if (c.type === 'phone_home') label = 'Home';
-        else if (c.type === 'phone_work') label = 'Work';
-        else if (c.type === 'email_personal') label = 'Personal';
-        else if (c.type === 'email_work') label = 'Work Email';
+        let defaultLabel = 'Contact';
+        if (c.type === 'phone_mobile') defaultLabel = 'Mobile';
+        else if (c.type === 'phone_home') defaultLabel = 'Home';
+        else if (c.type === 'phone_work') defaultLabel = 'Work';
+        else if (c.type === 'email_personal') defaultLabel = 'Personal Email';
+        else if (c.type === 'email_work') defaultLabel = 'Work Email';
 
-        contactsHtml += `<div class="contact-row">${icon} <strong style="font-size: 0.75rem; color: #94a3b8;">${label}:</strong> ${this.escapeHtml(c.value)}</div>`;
+        const displayLabel = c.label ? c.label : defaultLabel;
+
+        contactsHtml += `<div class="contact-row">${icon} <strong style="font-size: 0.75rem; color: #94a3b8;">${this.escapeHtml(displayLabel)}:</strong> ${this.escapeHtml(c.value)}</div>`;
 
         if (isEmail) {
-          actionButtonsHtml += `<a href="mailto:${c.value}" class="btn btn-glass btn-sm" title="Email ${c.value}">✉️ ${label}</a>`;
+          actionButtonsHtml += `<a href="mailto:${c.value}" class="btn btn-glass btn-sm" title="Email ${c.value}">✉️ ${this.escapeHtml(displayLabel)}</a>`;
         } else {
-          actionButtonsHtml += `<a href="tel:${c.value}" class="btn btn-glass btn-sm" title="Call ${c.value}">📞 ${label}</a>`;
+          actionButtonsHtml += `<a href="tel:${c.value}" class="btn btn-glass btn-sm" title="Call ${c.value}">📞 ${this.escapeHtml(displayLabel)}</a>`;
         }
       });
 
@@ -298,7 +375,7 @@ export class UIController {
             ${place.category || 'location'}
           </span>
         </div>
-        ${place.contactName ? `<div class="contact-row">👤 ${this.escapeHtml(place.contactName)}</div>` : ''}
+        ${peopleHtml}
         ${contactsHtml}
         ${place.address ? `<div class="contact-row">📍 ${this.escapeHtml(place.address)}</div>` : ''}
         
@@ -342,6 +419,34 @@ export class UIController {
 
   closeSettingsModal() {
     this.elements.settingsModal.classList.add('hidden');
+  }
+
+  /**
+   * Dedicated Key Prompt Modal & Key Warning State
+   */
+  openKeyPromptModal(token = '') {
+    if (this.elements.promptMapboxToken) {
+      this.elements.promptMapboxToken.value = token || '';
+    }
+    if (this.elements.keyPromptModal) {
+      this.elements.keyPromptModal.classList.remove('hidden');
+    }
+  }
+
+  closeKeyPromptModal() {
+    if (this.elements.keyPromptModal) {
+      this.elements.keyPromptModal.classList.add('hidden');
+    }
+  }
+
+  updateKeyWarningState(hasKey = true) {
+    if (hasKey) {
+      if (this.elements.keyWarningBanner) this.elements.keyWarningBanner.classList.add('hidden');
+      if (this.elements.keyWarningDot) this.elements.keyWarningDot.classList.add('hidden');
+    } else {
+      if (this.elements.keyWarningBanner) this.elements.keyWarningBanner.classList.remove('hidden');
+      if (this.elements.keyWarningDot) this.elements.keyWarningDot.classList.remove('hidden');
+    }
   }
 
   /**

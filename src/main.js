@@ -41,29 +41,44 @@ class NeighborhoodGuruApp {
       styleBtn.classList.add('active');
     }
 
-    // 4. Initialize Mapbox Engine
-    this.mapboxService.initMap('map', {
-      token: token,
-      homeAddress: this.homeAddress,
-      preferredStyle: preferredStyle,
-      onMapClick: (coords) => this.onMapClicked(coords),
-    });
-
-    // 5. Render markers once map is loaded
-    this.mapboxService.map.on('load', () => {
-      this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
-        this.ui.openLocationModal(place);
-      });
-    });
-
-    // 6. Bind event listeners
+    // 4. ALWAYS Bind event listeners FIRST so UI is 100% interactive
     this.bindEvents();
 
-    // Show initial welcome toast
-    if (!this.homeAddress) {
-      this.ui.showToast('App loaded in 3D Earth Globe view. Search an address to set your Home base!', 'info');
+    // 5. Check Mapbox Key Status
+    const hasKey = Boolean(token && token.trim().startsWith('pk.'));
+    this.ui.updateKeyWarningState(hasKey);
+
+    // 6. Safely initialize Mapbox Engine
+    if (hasKey) {
+      try {
+        const map = this.mapboxService.initMap('map', {
+          token: token,
+          homeAddress: this.homeAddress,
+          preferredStyle: preferredStyle,
+          onMapClick: (coords) => this.onMapClicked(coords),
+          onTokenError: () => {
+            this.ui.updateKeyWarningState(false);
+            this.ui.openKeyPromptModal(token);
+            this.ui.showToast('Invalid Mapbox access token. Please check your key.', 'error');
+          }
+        });
+
+        if (map) {
+          map.on('load', () => {
+            this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
+              this.ui.openLocationModal(place);
+            });
+          });
+        }
+      } catch (err) {
+        console.warn('Mapbox initialization failed:', err);
+        this.ui.updateKeyWarningState(false);
+      }
     } else {
-      this.ui.showToast(`Welcome back! Zoomed into Home at ${this.homeAddress.name || 'your neighborhood'}`, 'success');
+      setTimeout(() => {
+        this.ui.openKeyPromptModal(token);
+      }, 300);
+      this.ui.showToast('Mapbox Access Token required. Provide a key to enable map features!', 'error');
     }
   }
 
@@ -77,7 +92,7 @@ class NeighborhoodGuruApp {
     });
 
     const handleAddLocationClick = async () => {
-      const mapCenter = this.mapboxService.map.getCenter();
+      const mapCenter = this.mapboxService.map ? this.mapboxService.map.getCenter() : { lat: 37.7749, lng: -122.4194 };
       const coords = this.mapboxService.currentTempCoords || {
         lat: mapCenter.lat,
         lng: mapCenter.lng,
@@ -142,6 +157,20 @@ class NeighborhoodGuruApp {
 
       this.ui.showToast(`Switched map style to ${style.toUpperCase()}`, 'info');
     });
+
+    // --- 3D Buildings & Terrain Toggle ---
+    if (el.toggle3dBtn) {
+      el.toggle3dBtn.addEventListener('click', () => {
+        const isNow3D = this.mapboxService.toggle3DMode();
+        if (isNow3D) {
+          el.toggle3dBtn.classList.add('active');
+          this.ui.showToast('3D Buildings & Terrain Elevation Enabled!', 'success');
+        } else {
+          el.toggle3dBtn.classList.remove('active');
+          this.ui.showToast('Switched to 2D Flat View', 'info');
+        }
+      });
+    }
 
     // --- Sidebar Drawer Controls & Filters ---
     el.toggleSidebarBtn.addEventListener('click', () => this.ui.toggleSidebar());
@@ -229,6 +258,43 @@ class NeighborhoodGuruApp {
       }
     });
 
+    // --- Key Prompt Modal & Warning Banner Handlers ---
+    if (el.closeKeyPromptModal) {
+      el.closeKeyPromptModal.addEventListener('click', () => this.ui.closeKeyPromptModal());
+    }
+
+    if (el.dismissKeyPromptBtn) {
+      el.dismissKeyPromptBtn.addEventListener('click', () => {
+        this.ui.closeKeyPromptModal();
+        this.ui.showToast('Exploring in demo mode. Click "Provide Mapbox Key" to enable map tiles.', 'info');
+      });
+    }
+
+    if (el.bannerOpenKeyModalBtn) {
+      el.bannerOpenKeyModalBtn.addEventListener('click', () => {
+        this.ui.openKeyPromptModal(this.storage.getMapboxToken());
+      });
+    }
+
+    if (el.saveKeyPromptBtn) {
+      el.saveKeyPromptBtn.addEventListener('click', () => {
+        const token = el.promptMapboxToken ? el.promptMapboxToken.value.trim() : '';
+        if (!token) {
+          this.ui.showToast('Please enter a valid Mapbox Access Token.', 'error');
+          return;
+        }
+        if (!token.startsWith('pk.')) {
+          this.ui.showToast('Mapbox public tokens usually start with "pk." Please double check your key.', 'error');
+        }
+
+        this.storage.setMapboxToken(token);
+        this.ui.closeKeyPromptModal();
+        this.ui.updateKeyWarningState(true);
+        this.ui.showToast('Mapbox key saved! Reloading map...', 'success');
+        setTimeout(() => window.location.reload(), 800);
+      });
+    }
+
     // --- Backup Export & Import ---
     el.exportDataBtn.addEventListener('click', () => {
       const jsonStr = this.storage.exportDataJSON();
@@ -262,6 +328,39 @@ class NeighborhoodGuruApp {
     // --- Map Hint Dismiss ---
     el.dismissHintBtn.addEventListener('click', () => {
       el.mapHintBanner.style.display = 'none';
+    });
+
+    // --- Global Keyboard Event Handlers (ESC to close modals) ---
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        if (el.locationModal && !el.locationModal.classList.contains('hidden')) {
+          this.ui.closeLocationModal();
+          this.mapboxService.clearTempMarker();
+        }
+        if (el.settingsModal && !el.settingsModal.classList.contains('hidden')) {
+          this.ui.closeSettingsModal();
+        }
+        if (el.keyPromptModal && !el.keyPromptModal.classList.contains('hidden')) {
+          this.ui.closeKeyPromptModal();
+        }
+      }
+    });
+
+    // --- Modal Overlay Backdrop Click Handlers ---
+    [el.locationModal, el.settingsModal, el.keyPromptModal].forEach((modal) => {
+      if (!modal) return;
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+          if (modal === el.locationModal) {
+            this.ui.closeLocationModal();
+            this.mapboxService.clearTempMarker();
+          } else if (modal === el.settingsModal) {
+            this.ui.closeSettingsModal();
+          } else if (modal === el.keyPromptModal) {
+            this.ui.closeKeyPromptModal();
+          }
+        }
+      });
     });
   }
 
@@ -324,6 +423,11 @@ class NeighborhoodGuruApp {
    * Set Focused Address as Home Address
    */
   async handleSetHomeAddress() {
+    if (!this.mapboxService.map) {
+      this.ui.showToast('Mapbox key required to set home from map center.', 'error');
+      this.ui.openKeyPromptModal();
+      return;
+    }
     const center = this.mapboxService.map.getCenter();
     const coords = { lat: center.lat, lng: center.lng };
 
@@ -354,6 +458,7 @@ class NeighborhoodGuruApp {
 
     const colorRadio = el.locationForm.querySelector('input[name="form-color"]:checked');
     const existingId = el.formLocationId.value.trim();
+    const people = this.ui.getPeopleFieldsData();
     const contacts = this.ui.getContactFieldsData();
 
     const placeData = {
@@ -362,7 +467,7 @@ class NeighborhoodGuruApp {
       lng: parseFloat(el.formLng.value),
       name: name,
       category: el.formCategory.value,
-      contactName: el.formContactName.value.trim(),
+      people: people,
       contacts: contacts,
       address: el.formAddress.value.trim(),
       notes: el.formNotes.value.trim(),

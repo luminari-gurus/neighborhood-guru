@@ -97,6 +97,14 @@
           </button>
         </div>
 
+        <!-- 3D Buildings & Terrain Toggle -->
+        <button id="toggle-3d-btn" class="btn btn-glass active" title="Toggle 3D Buildings & Terrain Elevation">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+          <span class="btn-label">3D View</span>
+        </button>
+
         <!-- Places Drawer Toggle Button -->
         <button id="toggle-sidebar-btn" class="btn btn-glass btn-badge-wrapper" title="Saved Neighborhood Places">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -108,14 +116,26 @@
         </button>
 
         <!-- Settings / API Key Button -->
-        <button id="open-settings-btn" class="btn btn-glass btn-icon-only" title="Mapbox Settings & Key">
+        <button id="open-settings-btn" class="btn btn-glass btn-icon-only btn-badge-wrapper" title="Mapbox Settings & Key">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
           </svg>
+          <span id="key-warning-dot" class="warning-dot hidden" title="Mapbox key missing"></span>
         </button>
       </div>
     </header>
+
+    <!-- Mapbox Key Missing Warning Banner -->
+    <div id="key-warning-banner" class="key-warning-banner hidden">
+      <div class="banner-content">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <span><strong>Mapbox Key Required:</strong> Provide an Access Token to unlock interactive 3D map features, satellite view, and location search.</span>
+      </div>
+      <button id="banner-open-key-modal-btn" class="btn btn-accent btn-sm">Provide Mapbox Key</button>
+    </div>
 
     <!-- Map Click Instruction Banner (Appears when map is ready) -->
     <div class="map-hint-banner" id="map-hint-banner">
@@ -155,7 +175,7 @@
               <input type="text" id="form-name" placeholder="e.g. The Johnsons, Oak Street Bakery, Electrician Dave" required />
             </div>
 
-            <div class="form-group">
+            <div class="form-group full-width">
               <label for="form-category">Category</label>
               <select id="form-category">
                 <option value="neighbor">Neighbor 🏡</option>
@@ -167,11 +187,23 @@
               </select>
             </div>
 
-            <div class="form-group">
-              <label for="form-contact-name">Contact Person</label>
-              <input type="text" id="form-contact-name" placeholder="e.g. Sarah & John" />
+            <!-- People Section -->
+            <div class="form-group full-width">
+              <div class="section-label-header">
+                <label>People</label>
+                <button type="button" id="add-person-field-btn" class="btn btn-secondary btn-sm">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  <span>Add Person</span>
+                </button>
+              </div>
+              <div id="people-list-container" class="people-list-container">
+                <!-- Dynamic person rows rendered here -->
+              </div>
             </div>
 
+            <!-- Contact Info Section -->
             <div class="form-group full-width">
               <div class="section-label-header">
                 <label>Contact Info (Phones & Emails)</label>
@@ -308,6 +340,15 @@
             <label for="settings-mapbox-token">Mapbox Access Token</label>
             <input type="password" id="settings-mapbox-token" placeholder="pk.eyJ1..." />
           </div>
+
+          <div class="privacy-note">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+            <span><strong>Privacy Notice:</strong> Keys are stored locally in your browser (`localStorage`) to enable Mapbox rendering. No keys or personal data are stored on external servers.</span>
+          </div>
+
           <div class="home-address-section margin-top-md">
             <label>Current Home Address</label>
             <div id="current-home-display" class="info-box">No Home address configured</div>
@@ -317,6 +358,70 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="cancel-settings-btn">Cancel</button>
           <button class="btn btn-primary" id="save-settings-btn">Save Key & Reload Map</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dedicated First-Launch / Missing Mapbox Key Modal -->
+    <div id="key-prompt-modal" class="modal-overlay hidden">
+      <div class="modal-card glass-panel modal-medium">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <div class="modal-badge-icon key-badge-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="m21 2-2 2m-1.5 1.5L4 19a2.12 2.12 0 1 1-3-3L14.5 2.5M16 4l3 3M19 7l2 2m-2-2-1.5-1.5"/>
+                <circle cx="7.5" cy="16.5" r="1.5"/>
+              </svg>
+            </div>
+            <div>
+              <h3>Mapbox Key Required</h3>
+              <p class="modal-subtitle">Welcome to Neighborhood Guru!</p>
+            </div>
+          </div>
+          <button class="btn-close" id="close-key-prompt-modal" aria-label="Close modal">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="key-prompt-info">
+            <p>Neighborhood Guru uses <strong>Mapbox GL JS</strong> for 3D Earth Globe navigation, satellite views, location search, and street details. Please enter your Mapbox Access Token to enable full map functionality.</p>
+          </div>
+
+          <div class="form-group margin-top-md">
+            <label for="prompt-mapbox-token">Mapbox Access Token <span class="required">*</span></label>
+            <div class="token-input-wrapper">
+              <input 
+                type="text" 
+                id="prompt-mapbox-token" 
+                placeholder="pk.eyJ1IjoieW91ci11c2VybmFtZSIsImEiOiJjbHB6Y2V4Yzgx..." 
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <div class="token-help-text">
+              <span>Sample format: <code>pk.eyJ1Ijo...</code></span>
+              <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener noreferrer" class="mapbox-link">
+                Get a free key at Mapbox.com ↗
+              </a>
+            </div>
+          </div>
+
+          <div class="privacy-note">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+            <span><strong>100% Private & Local:</strong> Your API key is stored strictly in your browser's local storage (`localStorage`) and is never transmitted to any third-party or remote servers.</span>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="dismiss-key-prompt-btn">Explore Without Key</button>
+          <button type="button" class="btn btn-primary" id="save-key-prompt-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            Save Key & Activate Map
+          </button>
         </div>
       </div>
     </div>
