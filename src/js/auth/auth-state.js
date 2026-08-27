@@ -6,6 +6,25 @@ import {
   normalizeSession,
 } from './auth-client.js';
 
+const SUBSCRIPTION_SUPERSESSION = Object.freeze({
+  ALLOW: 'allow',
+  BLOCK: 'block',
+});
+
+const PASSIVE_SESSION_OPERATION = Object.freeze({
+  subscriptionSupersession: SUBSCRIPTION_SUPERSESSION.ALLOW,
+});
+
+const SIGN_IN_OPERATION = Object.freeze({
+  subscriptionSupersession: SUBSCRIPTION_SUPERSESSION.BLOCK,
+});
+
+const SIGN_OUT_OPERATION = Object.freeze({
+  subscriptionSupersession: SUBSCRIPTION_SUPERSESSION.BLOCK,
+  publishAuthenticating: false,
+  applySignedOut: true,
+});
+
 export function createAuthState(authClient) {
   const client = assertAuthClient(authClient);
   const listeners = new Set();
@@ -52,25 +71,31 @@ export function createAuthState(authClient) {
     if (!active) throw new Error('Auth state has been disposed');
   };
 
-  // Session-changing facade calls execute in invocation order. A subscription
-  // event invalidates only the operation executing at that moment; it cannot
-  // invalidate a later queued intent. This makes a later sign-out deterministic
-  // even when an earlier sign-in emits a delayed provider event.
-  const enqueueSessionOperation = async (operation, { authenticating = true, signedOut = false } = {}) => {
+  // Facade calls execute in invocation order. Passive operations yield to newer
+  // subscription state, while explicit user intents remain authoritative until
+  // their provider call settles.
+  const enqueueSessionOperation = async (
+    operation,
+    {
+      subscriptionSupersession,
+      publishAuthenticating = true,
+      applySignedOut = false,
+    },
+  ) => {
     assertActive();
 
     const execute = async () => {
       if (!active) return state;
-      const operationContext = { invalidated: false };
+      const operationContext = { invalidated: false, subscriptionSupersession };
       activeOperation = operationContext;
-      if (authenticating) {
+      if (publishAuthenticating) {
         publish({ status: AUTH_STATUS.AUTHENTICATING, user: null, session: null, error: null });
       }
 
       try {
         const session = await operation();
         if (!active || operationContext.invalidated) return state;
-        return applySession(signedOut ? null : session);
+        return applySession(applySignedOut ? null : session);
       } catch (error) {
         if (!active || operationContext.invalidated) return state;
         return fail(error);
@@ -97,6 +122,7 @@ export function createAuthState(authClient) {
       if (!unsubscribeClient) {
         unsubscribeClient = client.subscribe((session) => {
           if (!active) return;
+          if (activeOperation?.subscriptionSupersession === SUBSCRIPTION_SUPERSESSION.BLOCK) return;
           if (activeOperation) activeOperation.invalidated = true;
           try {
             applySession(session);
@@ -105,19 +131,16 @@ export function createAuthState(authClient) {
           }
         });
       }
-      return enqueueSessionOperation(() => client.loadSession());
+      return enqueueSessionOperation(() => client.loadSession(), PASSIVE_SESSION_OPERATION);
     },
     refreshSession() {
-      return enqueueSessionOperation(() => client.refreshSession());
+      return enqueueSessionOperation(() => client.refreshSession(), PASSIVE_SESSION_OPERATION);
     },
     signIn(options) {
-      return enqueueSessionOperation(() => client.signIn(options));
+      return enqueueSessionOperation(() => client.signIn(options), SIGN_IN_OPERATION);
     },
     signOut() {
-      return enqueueSessionOperation(() => client.signOut(), {
-        authenticating: false,
-        signedOut: true,
-      });
+      return enqueueSessionOperation(() => client.signOut(), SIGN_OUT_OPERATION);
     },
     subscribe(listener) {
       assertActive();
@@ -126,13 +149,17 @@ export function createAuthState(authClient) {
       notify(listener);
       return () => listeners.delete(listener);
     },
+    // Disposal is immediately effective. Provider unsubscribe errors are
+    // rethrown, and the handle is retained solely so a later dispose can retry.
     dispose() {
-      if (!active) return;
-      active = false;
-      if (activeOperation) activeOperation.invalidated = true;
-      if (unsubscribeClient) unsubscribeClient();
+      if (active) {
+        active = false;
+        if (activeOperation) activeOperation.invalidated = true;
+        listeners.clear();
+      }
+      if (!unsubscribeClient) return;
+      unsubscribeClient();
       unsubscribeClient = null;
-      listeners.clear();
     },
   });
 }

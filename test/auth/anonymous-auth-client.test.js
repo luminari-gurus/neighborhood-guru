@@ -58,6 +58,33 @@ class ControlledAuthClient extends FakeAuthClient {
   }
 }
 
+class ThrowingUnsubscribeAuthClient extends ControlledAuthClient {
+  subscribers = new Set();
+  unsubscribeCalls = 0;
+  removeBeforeThrow = false;
+
+  subscribe(listener) {
+    this.subscribers.add(listener);
+    return () => {
+      this.unsubscribeCalls += 1;
+      if (this.removeBeforeThrow) this.subscribers.delete(listener);
+      if (this.unsubscribeCalls === 1) throw new Error('unsubscribe failed');
+      this.subscribers.delete(listener);
+    };
+  }
+
+  emit(session) {
+    this.subscribers.forEach((listener) => listener(session));
+  }
+}
+
+async function initializeControlledAuth(auth, client) {
+  const initialization = auth.initialize();
+  await Promise.resolve();
+  client.operations.loadSession[0].resolve(null);
+  await initialization;
+}
+
 describe('anonymous authentication', () => {
   const originalFetch = globalThis.fetch;
 
@@ -175,7 +202,7 @@ describe('authentication state transitions', () => {
     expect(auth.getState().status).toBe(AUTH_STATUS.ANONYMOUS);
   });
 
-  test('subscription events invalidate stale operation successes and errors', async () => {
+  test('subscription events supersede stale passive operation successes and errors', async () => {
     const client = new ControlledAuthClient();
     const auth = createAuthState(client);
     const notifications = [];
@@ -200,14 +227,6 @@ describe('authentication state transitions', () => {
     expect(auth.getState()).toBe(refreshedBySubscription);
     expect(notifications.at(-1)).toBe(refreshedBySubscription);
 
-    const signIn = auth.signIn();
-    await Promise.resolve();
-    client.setSession({ ...session, user: { ...session.user, id: 'subscription-wins' } });
-    const signedInBySubscription = auth.getState();
-    client.operations.signIn[0].resolve(session);
-
-    expect(await signIn).toBe(signedInBySubscription);
-    expect(auth.getState()).toBe(signedInBySubscription);
     auth.dispose();
   });
 
@@ -318,19 +337,21 @@ describe('auth mutation ordering and listener isolation', () => {
     expiresAt: '2030-01-01T00:00:00.000Z',
   };
 
-  test('runs session operations in invocation order so later sign-out success wins', async () => {
+  test('sign-out success wins after provider execution begins and an older sign-in event arrives', async () => {
     const client = new ControlledAuthClient();
     const auth = createAuthState(client);
+    await initializeControlledAuth(auth, client);
     const signIn = auth.signIn();
-    const signOut = auth.signOut();
     await Promise.resolve();
 
-    expect(client.calls).toEqual(['signIn']);
-    client.setSession(session);
     client.operations.signIn[0].resolve(session);
     await signIn;
+
+    const signOut = auth.signOut();
     await Promise.resolve();
-    expect(client.calls).toEqual(['signIn', 'signOut']);
+    expect(client.calls).toEqual(['loadSession', 'signIn', 'signOut']);
+    client.setSession({ ...session, user: { ...session.user, id: 'delayed-sign-in' } });
+    expect(auth.getState().user.id).toBe('user-1');
 
     client.operations.signOut[0].resolve(null);
     expect((await signOut).status).toBe(AUTH_STATUS.ANONYMOUS);
@@ -341,15 +362,18 @@ describe('auth mutation ordering and listener isolation', () => {
   test('reports later sign-out failure despite an older delayed sign-in event', async () => {
     const client = new ControlledAuthClient();
     const auth = createAuthState(client);
+    await initializeControlledAuth(auth, client);
     const signIn = auth.signIn();
-    const signOut = auth.signOut();
     await Promise.resolve();
 
-    client.setSession(session);
     client.operations.signIn[0].resolve(session);
     await signIn;
+
+    const signOut = auth.signOut();
     await Promise.resolve();
-    expect(client.calls).toEqual(['signIn', 'signOut']);
+    expect(client.calls).toEqual(['loadSession', 'signIn', 'signOut']);
+    client.setSession({ ...session, user: { ...session.user, id: 'delayed-sign-in' } });
+    expect(auth.getState().user.id).toBe('user-1');
     client.operations.signOut[0].reject(new Error('sign-out failed'));
 
     const state = await signOut;
@@ -358,6 +382,65 @@ describe('auth mutation ordering and listener isolation', () => {
     expect(auth.getState()).toBe(state);
     auth.dispose();
   });
+
+  for (const outcome of ['success', 'failure']) {
+    test(`sign-in ${outcome} wins without publishing a stale provider event`, async () => {
+      const client = new ControlledAuthClient();
+      const auth = createAuthState(client);
+      await initializeControlledAuth(auth, client);
+      const statuses = [];
+      auth.subscribe((state) => statuses.push(state.status));
+
+      const signIn = auth.signIn();
+      await Promise.resolve();
+      client.setSession({ ...session, user: { ...session.user, id: 'stale' } });
+      expect(auth.getState().status).toBe(AUTH_STATUS.AUTHENTICATING);
+
+      if (outcome === 'success') client.operations.signIn[0].resolve(session);
+      else client.operations.signIn[0].reject(new Error('sign-in failed'));
+
+      const result = await signIn;
+      expect(result.status).toBe(outcome === 'success' ? AUTH_STATUS.AUTHENTICATED : AUTH_STATUS.ERROR);
+      expect(statuses.slice(0, -1)).not.toContain(AUTH_STATUS.AUTHENTICATED);
+      if (outcome === 'success') expect(statuses.at(-1)).toBe(AUTH_STATUS.AUTHENTICATED);
+      else expect(result.error.message).toBe('sign-in failed');
+      auth.dispose();
+    });
+  }
+
+  for (const removeBeforeThrow of [false, true]) {
+    test(`dispose is inactive and retries when unsubscribe ${removeBeforeThrow ? 'removes then throws' : 'throws before removal'}`, async () => {
+      const client = new ThrowingUnsubscribeAuthClient();
+      client.removeBeforeThrow = removeBeforeThrow;
+      const auth = createAuthState(client);
+      await initializeControlledAuth(auth, client);
+      let notifications = 0;
+      auth.subscribe(() => notifications += 1);
+      const active = auth.refreshSession();
+      const queued = auth.signIn();
+      await Promise.resolve();
+      const stateAtDisposal = auth.getState();
+      const notificationsAtDisposal = notifications;
+
+      expect(() => auth.dispose()).toThrow('unsubscribe failed');
+      expect(client.unsubscribeCalls).toBe(1);
+      client.emit(session);
+      client.operations.refreshSession[0].resolve(session);
+
+      expect(await active).toBe(stateAtDisposal);
+      expect(await queued).toBe(stateAtDisposal);
+      expect(client.operations.signIn).toHaveLength(0);
+      expect(auth.getState()).toBe(stateAtDisposal);
+      expect(notifications).toBe(notificationsAtDisposal);
+      expect(() => auth.subscribe(() => {})).toThrow('Auth state has been disposed');
+
+      expect(() => auth.dispose()).not.toThrow();
+      expect(client.unsubscribeCalls).toBe(2);
+      expect(client.subscribers.size).toBe(0);
+      auth.dispose();
+      expect(client.unsubscribeCalls).toBe(2);
+    });
+  }
 
   test('isolates listeners that throw initially and during transitions', async () => {
     const client = new FakeAuthClient();
