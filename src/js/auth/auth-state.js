@@ -12,11 +12,22 @@ export function createAuthState(authClient) {
   let state = ANONYMOUS_AUTH_STATE;
   let unsubscribeClient = null;
   let active = true;
-  let version = 0;
+  let activeOperation = null;
+  let operationQueue = Promise.resolve();
+
+  // State publication is reliable and listener delivery is best-effort. A broken
+  // consumer must never block other consumers or poison an auth operation.
+  const notify = (listener) => {
+    try {
+      listener(state);
+    } catch {
+      // Listener failures belong to the consumer and are intentionally isolated.
+    }
+  };
 
   const publish = (nextState) => {
     state = Object.freeze(nextState);
-    listeners.forEach((listener) => listener(state));
+    listeners.forEach(notify);
     return state;
   };
 
@@ -41,18 +52,36 @@ export function createAuthState(authClient) {
     if (!active) throw new Error('Auth state has been disposed');
   };
 
-  const runSessionOperation = async (operation) => {
+  // Session-changing facade calls execute in invocation order. A subscription
+  // event invalidates only the operation executing at that moment; it cannot
+  // invalidate a later queued intent. This makes a later sign-out deterministic
+  // even when an earlier sign-in emits a delayed provider event.
+  const enqueueSessionOperation = async (operation, { authenticating = true, signedOut = false } = {}) => {
     assertActive();
-    const operationVersion = ++version;
-    publish({ status: AUTH_STATUS.AUTHENTICATING, user: null, session: null, error: null });
-    try {
-      const session = await operation();
-      if (!active || operationVersion !== version) return state;
-      return applySession(session);
-    } catch (error) {
-      if (!active || operationVersion !== version) return state;
-      return fail(error);
-    }
+
+    const execute = async () => {
+      if (!active) return state;
+      const operationContext = { invalidated: false };
+      activeOperation = operationContext;
+      if (authenticating) {
+        publish({ status: AUTH_STATUS.AUTHENTICATING, user: null, session: null, error: null });
+      }
+
+      try {
+        const session = await operation();
+        if (!active || operationContext.invalidated) return state;
+        return applySession(signedOut ? null : session);
+      } catch (error) {
+        if (!active || operationContext.invalidated) return state;
+        return fail(error);
+      } finally {
+        if (activeOperation === operationContext) activeOperation = null;
+      }
+    };
+
+    const result = operationQueue.then(execute, execute);
+    operationQueue = result.then(() => undefined, () => undefined);
+    return result;
   };
 
   return Object.freeze({
@@ -68,7 +97,7 @@ export function createAuthState(authClient) {
       if (!unsubscribeClient) {
         unsubscribeClient = client.subscribe((session) => {
           if (!active) return;
-          version += 1;
+          if (activeOperation) activeOperation.invalidated = true;
           try {
             applySession(session);
           } catch (error) {
@@ -76,37 +105,31 @@ export function createAuthState(authClient) {
           }
         });
       }
-      return runSessionOperation(() => client.loadSession());
+      return enqueueSessionOperation(() => client.loadSession());
     },
     refreshSession() {
-      return runSessionOperation(() => client.refreshSession());
+      return enqueueSessionOperation(() => client.refreshSession());
     },
     signIn(options) {
-      return runSessionOperation(() => client.signIn(options));
+      return enqueueSessionOperation(() => client.signIn(options));
     },
-    async signOut() {
-      assertActive();
-      const operationVersion = ++version;
-      try {
-        await client.signOut();
-        if (!active || operationVersion !== version) return state;
-        return applySession(null);
-      } catch (error) {
-        if (!active || operationVersion !== version) return state;
-        return fail(error);
-      }
+    signOut() {
+      return enqueueSessionOperation(() => client.signOut(), {
+        authenticating: false,
+        signedOut: true,
+      });
     },
     subscribe(listener) {
       assertActive();
       if (typeof listener !== 'function') throw new TypeError('Auth state listener must be a function');
       listeners.add(listener);
-      listener(state);
+      notify(listener);
       return () => listeners.delete(listener);
     },
     dispose() {
       if (!active) return;
       active = false;
-      version += 1;
+      if (activeOperation) activeOperation.invalidated = true;
       if (unsubscribeClient) unsubscribeClient();
       unsubscribeClient = null;
       listeners.clear();

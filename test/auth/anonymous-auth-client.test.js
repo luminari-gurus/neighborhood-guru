@@ -5,6 +5,8 @@ import {
   FakeAuthClient,
   createAnonymousAuthClient,
   createAuthState,
+  normalizeProviders,
+  normalizeSession,
 } from '../../src/js/auth/index.js';
 
 function deferred() {
@@ -22,23 +24,36 @@ class ControlledAuthClient extends FakeAuthClient {
     loadSession: [],
     refreshSession: [],
     signIn: [],
+    signOut: [],
   };
 
+  calls = [];
+
   loadSession() {
+    this.calls.push('loadSession');
     const operation = deferred();
     this.operations.loadSession.push(operation);
     return operation.promise;
   }
 
   refreshSession() {
+    this.calls.push('refreshSession');
     const operation = deferred();
     this.operations.refreshSession.push(operation);
     return operation.promise;
   }
 
   signIn() {
+    this.calls.push('signIn');
     const operation = deferred();
     this.operations.signIn.push(operation);
+    return operation.promise;
+  }
+
+  signOut() {
+    this.calls.push('signOut');
+    const operation = deferred();
+    this.operations.signOut.push(operation);
     return operation.promise;
   }
 }
@@ -125,7 +140,7 @@ describe('authentication state transitions', () => {
     invalidClient.discoverProviders = async () => [{ displayName: 'Missing id' }];
     const invalidAuth = createAuthState(invalidClient);
     await expect(invalidAuth.discoverProviders()).rejects.toThrow(
-      'Auth providers require a non-empty id',
+      'Auth providers require a non-empty string id',
     );
     invalidAuth.dispose();
 
@@ -167,6 +182,7 @@ describe('authentication state transitions', () => {
     auth.subscribe((state) => notifications.push(state));
 
     const initialization = auth.initialize();
+    await Promise.resolve();
     client.setSession({ ...session, user: { ...session.user, id: 'new' } });
     const authenticated = auth.getState();
     client.operations.loadSession[0].resolve(null);
@@ -175,6 +191,7 @@ describe('authentication state transitions', () => {
     expect(auth.getState()).toBe(authenticated);
 
     const refresh = auth.refreshSession();
+    await Promise.resolve();
     client.setSession(session);
     const refreshedBySubscription = auth.getState();
     client.operations.refreshSession[0].reject(new Error('stale refresh failure'));
@@ -184,6 +201,7 @@ describe('authentication state transitions', () => {
     expect(notifications.at(-1)).toBe(refreshedBySubscription);
 
     const signIn = auth.signIn();
+    await Promise.resolve();
     client.setSession({ ...session, user: { ...session.user, id: 'subscription-wins' } });
     const signedInBySubscription = auth.getState();
     client.operations.signIn[0].resolve(session);
@@ -193,18 +211,23 @@ describe('authentication state transitions', () => {
     auth.dispose();
   });
 
-  test('only the newest concurrent operation may publish a terminal result', async () => {
+  test('executes concurrent facade operations in invocation order', async () => {
     const client = new ControlledAuthClient();
     const auth = createAuthState(client);
 
     const initialization = auth.initialize();
     const signIn = auth.signIn();
+    await Promise.resolve();
+    expect(client.calls).toEqual(['loadSession']);
+    client.operations.loadSession[0].reject(new Error('older failure'));
+    expect((await initialization).status).toBe(AUTH_STATUS.ERROR);
+    await Promise.resolve();
+
     const newestSession = { ...session, user: { ...session.user, id: 'newest' } };
+    expect(client.calls).toEqual(['loadSession', 'signIn']);
     client.operations.signIn[0].resolve(newestSession);
     const newestState = await signIn;
-    client.operations.loadSession[0].reject(new Error('older failure'));
 
-    expect(await initialization).toBe(newestState);
     expect(auth.getState()).toBe(newestState);
     expect(auth.getState().user.id).toBe('newest');
     auth.dispose();
@@ -217,22 +240,151 @@ describe('authentication state transitions', () => {
     auth.subscribe(() => notifications += 1);
     const initialization = auth.initialize();
     const refresh = auth.refreshSession();
+    await Promise.resolve();
     const stateAtDisposal = auth.getState();
 
     auth.dispose();
     client.operations.loadSession[0].resolve(session);
-    client.operations.refreshSession[0].reject(new Error('disposed refresh failure'));
+    expect(client.operations.refreshSession).toHaveLength(0);
     client.setSession(session);
 
     expect(await initialization).toBe(stateAtDisposal);
     expect(await refresh).toBe(stateAtDisposal);
     expect(auth.getState()).toBe(stateAtDisposal);
-    expect(notifications).toBe(3);
+    expect(notifications).toBe(2);
     expect(() => auth.subscribe(() => {})).toThrow('Auth state has been disposed');
     await expect(auth.refreshSession()).rejects.toThrow('Auth state has been disposed');
     await expect(auth.signIn({ session })).rejects.toThrow('Auth state has been disposed');
     await expect(auth.signOut()).rejects.toThrow('Auth state has been disposed');
     await expect(auth.initialize()).rejects.toThrow('Auth state has been disposed');
     await expect(auth.discoverProviders()).rejects.toThrow('Auth state has been disposed');
+  });
+});
+
+describe('provider-neutral auth normalization', () => {
+  test('rejects non-scalar provider and session fields', () => {
+    const invalidOptionalValues = [{ mutable: true }, [], () => 'value', 123, true];
+
+    for (const value of invalidOptionalValues) {
+      expect(() => normalizeProviders([{ id: 'provider', displayName: value }])).toThrow(
+        'Auth provider displayName must be a string or null',
+      );
+      expect(() => normalizeSession({ user: { id: 'user', displayName: value } })).toThrow(
+        'Auth user displayName must be a string or null',
+      );
+      expect(() => normalizeSession({ user: { id: 'user', email: value } })).toThrow(
+        'Auth user email must be a string or null',
+      );
+      expect(() => normalizeSession({ user: { id: 'user', avatarUrl: value } })).toThrow(
+        'Auth user avatarUrl must be a string or null',
+      );
+      expect(() => normalizeSession({ user: { id: 'user' }, expiresAt: value })).toThrow(
+        'Auth session expiresAt must be a string or null',
+      );
+    }
+
+    for (const id of ['', '   ', {}, [], null, undefined]) {
+      expect(() => normalizeProviders([{ id }])).toThrow(
+        'Auth providers require a non-empty string id',
+      );
+      expect(() => normalizeSession({ user: { id } })).toThrow(
+        'Auth sessions require a user with a non-empty string id',
+      );
+    }
+  });
+
+  test('returns immutable scalar records and preserves optional empty strings', () => {
+    const providers = normalizeProviders([{ id: ' provider ', displayName: '' }]);
+    const session = normalizeSession({
+      user: { id: ' user ', displayName: '', email: '', avatarUrl: '' },
+      expiresAt: '',
+    });
+
+    expect(providers).toEqual([{ id: ' provider ', displayName: '' }]);
+    expect(session).toEqual({
+      user: { id: ' user ', displayName: '', email: '', avatarUrl: '' },
+      expiresAt: '',
+    });
+    expect(Object.isFrozen(providers)).toBe(true);
+    expect(Object.isFrozen(providers[0])).toBe(true);
+    expect(Object.isFrozen(session)).toBe(true);
+    expect(Object.isFrozen(session.user)).toBe(true);
+  });
+});
+
+describe('auth mutation ordering and listener isolation', () => {
+  const session = {
+    user: { id: 'user-1', displayName: 'Ada Neighbor', email: 'ada@example.test', avatarUrl: null },
+    expiresAt: '2030-01-01T00:00:00.000Z',
+  };
+
+  test('runs session operations in invocation order so later sign-out success wins', async () => {
+    const client = new ControlledAuthClient();
+    const auth = createAuthState(client);
+    const signIn = auth.signIn();
+    const signOut = auth.signOut();
+    await Promise.resolve();
+
+    expect(client.calls).toEqual(['signIn']);
+    client.setSession(session);
+    client.operations.signIn[0].resolve(session);
+    await signIn;
+    await Promise.resolve();
+    expect(client.calls).toEqual(['signIn', 'signOut']);
+
+    client.operations.signOut[0].resolve(null);
+    expect((await signOut).status).toBe(AUTH_STATUS.ANONYMOUS);
+    expect(auth.getState().status).toBe(AUTH_STATUS.ANONYMOUS);
+    auth.dispose();
+  });
+
+  test('reports later sign-out failure despite an older delayed sign-in event', async () => {
+    const client = new ControlledAuthClient();
+    const auth = createAuthState(client);
+    const signIn = auth.signIn();
+    const signOut = auth.signOut();
+    await Promise.resolve();
+
+    client.setSession(session);
+    client.operations.signIn[0].resolve(session);
+    await signIn;
+    await Promise.resolve();
+    expect(client.calls).toEqual(['signIn', 'signOut']);
+    client.operations.signOut[0].reject(new Error('sign-out failed'));
+
+    const state = await signOut;
+    expect(state.status).toBe(AUTH_STATUS.ERROR);
+    expect(state.error.message).toBe('sign-out failed');
+    expect(auth.getState()).toBe(state);
+    auth.dispose();
+  });
+
+  test('isolates listeners that throw initially and during transitions', async () => {
+    const client = new FakeAuthClient();
+    const auth = createAuthState(client);
+    const healthyStatuses = [];
+    let throwingCalls = 0;
+
+    expect(() => auth.subscribe(() => {
+      throwingCalls += 1;
+      throw new Error('listener failed');
+    })).not.toThrow();
+    auth.subscribe((state) => healthyStatuses.push(state.status));
+
+    await expect(auth.initialize()).resolves.toMatchObject({ status: AUTH_STATUS.ANONYMOUS });
+    await expect(auth.signIn({ session })).resolves.toMatchObject({ status: AUTH_STATUS.AUTHENTICATED });
+    await expect(auth.signOut()).resolves.toMatchObject({ status: AUTH_STATUS.ANONYMOUS });
+
+    expect(throwingCalls).toBe(6);
+    expect(healthyStatuses).toEqual([
+      AUTH_STATUS.ANONYMOUS,
+      AUTH_STATUS.AUTHENTICATING,
+      AUTH_STATUS.ANONYMOUS,
+      AUTH_STATUS.AUTHENTICATING,
+      AUTH_STATUS.AUTHENTICATED,
+      AUTH_STATUS.ANONYMOUS,
+    ]);
+    expect(auth.getState().status).toBe(AUTH_STATUS.ANONYMOUS);
+    auth.dispose();
   });
 });
