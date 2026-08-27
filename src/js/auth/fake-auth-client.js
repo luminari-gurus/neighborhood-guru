@@ -1,8 +1,9 @@
-import { normalizeSession } from './auth-client.js';
+import { normalizeProviders, normalizeSession } from './auth-client.js';
 
 export class FakeAuthClient {
-  constructor({ provider = null, session = null } = {}) {
-    this.provider = provider;
+  #providers;
+  constructor({ providers = [], session = null } = {}) {
+    this.#providers = normalizeProviders(providers);
     this.session = normalizeSession(session);
     this.listeners = new Set();
     this.failures = new Map();
@@ -21,8 +22,8 @@ export class FakeAuthClient {
     return value;
   }
 
-  discoverProvider() {
-    return this.#result('discoverProvider', this.provider);
+  discoverProviders() {
+    return this.#result('discoverProviders', this.#providers);
   }
 
   loadSession() {

@@ -2,6 +2,7 @@ import {
   ANONYMOUS_AUTH_STATE,
   AUTH_STATUS,
   assertAuthClient,
+  normalizeProviders,
   normalizeSession,
 } from './auth-client.js';
 
@@ -46,6 +47,9 @@ export function createAuthState(authClient) {
   return Object.freeze({
     getState() {
       return state;
+    },
+    async discoverProviders() {
+      return normalizeProviders(await client.discoverProviders());
     },
     async initialize() {
       if (!unsubscribeClient) {

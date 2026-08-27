@@ -16,14 +16,15 @@ export const ANONYMOUS_AUTH_STATE = Object.freeze({
  * Provider-neutral AuthClient contract.
  *
  * Implementations expose these methods:
- * discoverProvider(), loadSession(), refreshSession(), signIn(options),
+ * discoverProviders(), loadSession(), refreshSession(), signIn(options),
  * signOut(), and subscribe(listener). subscribe returns an unsubscribe function.
+ * Provider results are frozen arrays of provider-neutral { id, displayName } records.
  * Session results are either null or normalized as { user, expiresAt } where
  * user is { id, displayName, email, avatarUrl } with no provider claims.
  */
 export function assertAuthClient(client) {
   const methods = [
-    'discoverProvider',
+    'discoverProviders',
     'loadSession',
     'refreshSession',
     'signIn',
@@ -36,6 +37,23 @@ export function assertAuthClient(client) {
   }
 
   return client;
+}
+
+export function normalizeProviders(providers) {
+  if (!Array.isArray(providers)) {
+    throw new TypeError('Auth providers must be an array');
+  }
+
+  return Object.freeze(providers.map((provider) => {
+    if (!provider || typeof provider.id !== 'string' || provider.id.trim().length === 0) {
+      throw new TypeError('Auth providers require a non-empty id');
+    }
+
+    return Object.freeze({
+      id: provider.id,
+      displayName: provider.displayName ?? null,
+    });
+  }));
 }
 
 export function normalizeSession(session) {

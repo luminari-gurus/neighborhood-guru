@@ -14,7 +14,7 @@ describe('anonymous authentication', () => {
     globalThis.fetch = originalFetch;
   });
 
-  test('initializes in local-only anonymous mode without network requests', async () => {
+  test('initializes and discovers no providers without network requests', async () => {
     let requestCount = 0;
     globalThis.fetch = async () => {
       requestCount += 1;
@@ -22,6 +22,7 @@ describe('anonymous authentication', () => {
     };
 
     const auth = createAuthState(createAnonymousAuthClient());
+    const providers = await auth.discoverProviders();
     const state = await auth.initialize();
 
     expect(state).toEqual({
@@ -30,6 +31,8 @@ describe('anonymous authentication', () => {
       session: null,
       error: null,
     });
+    expect(providers).toEqual([]);
+    expect(Object.isFrozen(providers)).toBe(true);
     expect(requestCount).toBe(0);
 
     auth.dispose();
@@ -55,17 +58,45 @@ describe('authentication state transitions', () => {
     auth.dispose();
   });
 
-  test('supports discovery, refresh, sign-out, and change listeners', async () => {
-    const provider = { id: 'fake', displayName: 'Fake provider' };
-    const client = new FakeAuthClient({ provider, session });
+  test('supports multiple provider discovery through the auth facade', async () => {
+    const sourceProviders = [
+      { id: 'apple', displayName: 'Apple', ignored: 'provider-specific' },
+      { id: 'google', displayName: 'Google' },
+    ];
+    const client = new FakeAuthClient({ providers: sourceProviders, session });
     const auth = createAuthState(client);
-    expect(await client.discoverProvider()).toEqual(provider);
+    sourceProviders[0].displayName = 'Changed outside the fake';
+    const providers = await auth.discoverProviders();
+    expect(providers).toEqual([
+      { id: 'apple', displayName: 'Apple' },
+      { id: 'google', displayName: 'Google' },
+    ]);
+    expect(Object.isFrozen(providers)).toBe(true);
+    expect(providers.every(Object.isFrozen)).toBe(true);
+    expect(() => providers.push({ id: 'other', displayName: 'Other' })).toThrow();
+    expect(() => { providers[0].displayName = 'Changed'; }).toThrow();
     expect((await auth.initialize()).status).toBe(AUTH_STATUS.AUTHENTICATED);
     client.setSession(null);
     expect(auth.getState().status).toBe(AUTH_STATUS.ANONYMOUS);
     client.setSession(session);
     expect((await auth.refreshSession()).status).toBe(AUTH_STATUS.AUTHENTICATED);
     expect((await auth.signOut()).status).toBe(AUTH_STATUS.ANONYMOUS);
+    auth.dispose();
+  });
+
+  test('rejects invalid provider data and reports discovery errors through the facade', async () => {
+    const invalidClient = new FakeAuthClient();
+    invalidClient.discoverProviders = async () => [{ displayName: 'Missing id' }];
+    const invalidAuth = createAuthState(invalidClient);
+    await expect(invalidAuth.discoverProviders()).rejects.toThrow(
+      'Auth providers require a non-empty id',
+    );
+    invalidAuth.dispose();
+
+    const client = new FakeAuthClient();
+    const auth = createAuthState(client);
+    client.failNext('discoverProviders', new Error('provider discovery unavailable'));
+    await expect(auth.discoverProviders()).rejects.toThrow('provider discovery unavailable');
     auth.dispose();
   });
 

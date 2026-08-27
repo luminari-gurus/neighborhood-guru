@@ -1,7 +1,7 @@
 export function createAnonymousAuthClient() {
   return Object.freeze({
-    async discoverProvider() {
-      return null;
+    async discoverProviders() {
+      return Object.freeze([]);
     },
     async loadSession() {
       return null;
