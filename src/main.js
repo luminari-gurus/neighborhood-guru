@@ -8,12 +8,15 @@ import { UIController } from './js/ui.js';
 import { WeatherService } from './js/weather-service.js';
 import { OverpassService } from './js/overpass-service.js';
 import { JamBaseService } from './js/jambase-service.js';
+import { createAnonymousAuthClient, createAuthState } from './js/auth/index.js';
 
 class NeighborhoodGuruApp {
   constructor() {
     this.storage = StorageService;
     this.mapboxService = new MapboxService();
     this.ui = new UIController();
+    this.auth = createAuthState(createAnonymousAuthClient());
+    this.authState = this.auth.getState();
 
     this.homeAddress = null;
     this.savedPlaces = [];
@@ -23,6 +26,9 @@ class NeighborhoodGuruApp {
   }
 
   async init() {
+    // Anonymous auth is provider-neutral and does not gate local data.
+    this.authState = await this.auth.initialize();
+
     // 1. Initialize UI Controller & cache elements
     this.ui.init();
 
