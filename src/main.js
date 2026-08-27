@@ -16,7 +16,9 @@ class NeighborhoodGuruApp {
     this.mapboxService = new MapboxService();
     this.ui = new UIController();
     this.auth = createAuthState(createAnonymousAuthClient());
-    this.authState = this.auth.getState();
+    this.unsubscribeAuth = this.auth.subscribe((state) => {
+      this.authState = state;
+    });
 
     this.homeAddress = null;
     this.savedPlaces = [];
@@ -27,7 +29,7 @@ class NeighborhoodGuruApp {
 
   async init() {
     // Anonymous auth is provider-neutral and does not gate local data.
-    this.authState = await this.auth.initialize();
+    await this.auth.initialize();
 
     // 1. Initialize UI Controller & cache elements
     this.ui.init();

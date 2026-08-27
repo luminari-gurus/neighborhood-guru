@@ -7,6 +7,42 @@ import {
   createAuthState,
 } from '../../src/js/auth/index.js';
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+class ControlledAuthClient extends FakeAuthClient {
+  operations = {
+    loadSession: [],
+    refreshSession: [],
+    signIn: [],
+  };
+
+  loadSession() {
+    const operation = deferred();
+    this.operations.loadSession.push(operation);
+    return operation.promise;
+  }
+
+  refreshSession() {
+    const operation = deferred();
+    this.operations.refreshSession.push(operation);
+    return operation.promise;
+  }
+
+  signIn() {
+    const operation = deferred();
+    this.operations.signIn.push(operation);
+    return operation.promise;
+  }
+}
+
 describe('anonymous authentication', () => {
   const originalFetch = globalThis.fetch;
 
@@ -122,5 +158,81 @@ describe('authentication state transitions', () => {
     auth.dispose();
     client.setSession(session);
     expect(auth.getState().status).toBe(AUTH_STATUS.ANONYMOUS);
+  });
+
+  test('subscription events invalidate stale operation successes and errors', async () => {
+    const client = new ControlledAuthClient();
+    const auth = createAuthState(client);
+    const notifications = [];
+    auth.subscribe((state) => notifications.push(state));
+
+    const initialization = auth.initialize();
+    client.setSession({ ...session, user: { ...session.user, id: 'new' } });
+    const authenticated = auth.getState();
+    client.operations.loadSession[0].resolve(null);
+
+    expect(await initialization).toBe(authenticated);
+    expect(auth.getState()).toBe(authenticated);
+
+    const refresh = auth.refreshSession();
+    client.setSession(session);
+    const refreshedBySubscription = auth.getState();
+    client.operations.refreshSession[0].reject(new Error('stale refresh failure'));
+
+    expect(await refresh).toBe(refreshedBySubscription);
+    expect(auth.getState()).toBe(refreshedBySubscription);
+    expect(notifications.at(-1)).toBe(refreshedBySubscription);
+
+    const signIn = auth.signIn();
+    client.setSession({ ...session, user: { ...session.user, id: 'subscription-wins' } });
+    const signedInBySubscription = auth.getState();
+    client.operations.signIn[0].resolve(session);
+
+    expect(await signIn).toBe(signedInBySubscription);
+    expect(auth.getState()).toBe(signedInBySubscription);
+    auth.dispose();
+  });
+
+  test('only the newest concurrent operation may publish a terminal result', async () => {
+    const client = new ControlledAuthClient();
+    const auth = createAuthState(client);
+
+    const initialization = auth.initialize();
+    const signIn = auth.signIn();
+    const newestSession = { ...session, user: { ...session.user, id: 'newest' } };
+    client.operations.signIn[0].resolve(newestSession);
+    const newestState = await signIn;
+    client.operations.loadSession[0].reject(new Error('older failure'));
+
+    expect(await initialization).toBe(newestState);
+    expect(auth.getState()).toBe(newestState);
+    expect(auth.getState().user.id).toBe('newest');
+    auth.dispose();
+  });
+
+  test('dispose invalidates operations and makes later facade use inert', async () => {
+    const client = new ControlledAuthClient();
+    const auth = createAuthState(client);
+    let notifications = 0;
+    auth.subscribe(() => notifications += 1);
+    const initialization = auth.initialize();
+    const refresh = auth.refreshSession();
+    const stateAtDisposal = auth.getState();
+
+    auth.dispose();
+    client.operations.loadSession[0].resolve(session);
+    client.operations.refreshSession[0].reject(new Error('disposed refresh failure'));
+    client.setSession(session);
+
+    expect(await initialization).toBe(stateAtDisposal);
+    expect(await refresh).toBe(stateAtDisposal);
+    expect(auth.getState()).toBe(stateAtDisposal);
+    expect(notifications).toBe(3);
+    expect(() => auth.subscribe(() => {})).toThrow('Auth state has been disposed');
+    await expect(auth.refreshSession()).rejects.toThrow('Auth state has been disposed');
+    await expect(auth.signIn({ session })).rejects.toThrow('Auth state has been disposed');
+    await expect(auth.signOut()).rejects.toThrow('Auth state has been disposed');
+    await expect(auth.initialize()).rejects.toThrow('Auth state has been disposed');
+    await expect(auth.discoverProviders()).rejects.toThrow('Auth state has been disposed');
   });
 });
