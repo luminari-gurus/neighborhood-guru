@@ -10,7 +10,7 @@ const randomBytes = (length) => Uint8Array.from({ length }, (_, i) => (i + ++see
 const config = (secret = 'a'.repeat(32)) => ({ mode: 'optional', secret, databasePath: ':memory:', production: false });
 const req = (path, init) => new Request(`https://app.example${path}`, init);
 const cookieValue = (response, name) => response.headers.getSetCookie().map((value) => value.match(new RegExp(`^${name}=([^;]*)`))?.[1]).find(Boolean);
-const cookieValues = (response, name) => response.headers.getSetCookie().map((value) => value.match(new RegExp(`^${name}=([^;]*)`))?.[1]).filter(Boolean);
+const cookieValues = (response, name) => response.headers.getSetCookie().filter((value) => value.startsWith(`${name}=`));
 const callbackHeaders = (state, session) => ({ cookie: `${LOGIN_STATE_COOKIE_NAME}=${state}${session ? `; ${SESSION_COOKIE_NAME}=${session}` : ""}` });
 const provider = (id = 'generic', overrides = {}) => ({ id, displayName: id, createAuthorizationUrl: async ({ state }) => `https://id.example/auth?state=${state}`, exchangeCallback: async () => ({ identity: { issuer: 'https://id.example', subject: 'subject' }, user: { displayName: 'Ada', email: null, avatarUrl: null }, returnPath: '/evil' }), ...overrides });
 function backend(options = {}) { const database = options.database || new Database(':memory:'); databases.push(database); return createAuthBackend({ config: config(), database, clock: () => NOW, randomBytes, providers: [provider()], ...options }); }
@@ -69,21 +69,23 @@ describe('login transaction security regressions', () => {
     oldApi.database.run("INSERT INTO users VALUES (?,NULL,NULL,NULL,?,?)", ["existing", NOW, NOW]);
     const stale = oldApi.issueSession("existing");
     const rotated = createAuthBackend({ config: config('b'.repeat(32)), database: shared, clock: () => NOW, randomBytes, providers: [provider()] });
-    const staleLogin = await rotated.fetch(req('/api/auth/login/generic'), { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}` } });
+    const staleLogin = await rotated.fetch(req('/api/auth/login/generic', { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}` } }));
     const staleLoginState = cookieValue(staleLogin, LOGIN_STATE_COOKIE_NAME);
     const staleLoginClears = cookieValues(staleLogin, SESSION_COOKIE_NAME);
     expect(staleLoginClears).toHaveLength(1);
     expect(staleLoginClears[0]).toContain('Max-Age=0');
     expect(staleLoginState).toBeString();
-    expect((await rotated.fetch(req(`/api/auth/callback/generic?state=${staleLoginState}`, { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}; ${LOGIN_STATE_COOKIE_NAME}=${staleLoginState}` } })).status).toBe(400);
-    const cleanLogin = await rotated.fetch(req('/api/auth/login/generic'), { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}` } });
+    const staleCallback = await rotated.fetch(req(`/api/auth/callback/generic?state=${staleLoginState}`, { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}; ${LOGIN_STATE_COOKIE_NAME}=${staleLoginState}` } }));
+    expect(staleCallback.status).toBe(400);
+    const cleanLogin = await rotated.fetch(req('/api/auth/login/generic', { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}` } }));
     const cleanStateValue = cookieValue(cleanLogin, LOGIN_STATE_COOKIE_NAME);
     expect(cookieValues(cleanLogin, SESSION_COOKIE_NAME)).toHaveLength(1);
     const cleanCallback = await rotated.fetch(req(`/api/auth/callback/generic?state=${cleanStateValue}`, { headers: { cookie: `${LOGIN_STATE_COOKIE_NAME}=${cleanStateValue}` } }));
     expect(cleanCallback.status).toBe(302);
     const newSession = cookieValue(cleanCallback, SESSION_COOKIE_NAME);
     expect(newSession).toBeString();
-    expect((await rotated.fetch(req('/api/auth/session', { headers: { cookie: `${SESSION_COOKIE_NAME}=${newSession}` } })).status).toBe(200);
+    const freshSession = await rotated.fetch(req('/api/auth/session', { headers: { cookie: `${SESSION_COOKIE_NAME}=${newSession}` } }));
+    expect(freshSession.status).toBe(200);
   });
   test('invalid provider scalars and oversized fields are rejected before writes', async () => {
     for (const result of [

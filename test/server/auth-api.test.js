@@ -150,9 +150,11 @@ describe('sessions, callback, and logout', () => {
     const api = backend();
     const missing = await api.fetch(request('/api/auth/logout', { method: 'POST' }));
     expect(missing.status).toBe(401); expect(missing.headers.get('set-cookie')).toContain('Max-Age=0');
-    expect((await api.fetch(request('/api/auth/logout', { method: 'POST', headers: { cookie: `${SESSION_COOKIE_NAME}=bad` } })).headers.get('set-cookie')).toContain('Max-Age=0');
+    const badCookieResponse = await api.fetch(request('/api/auth/logout', { method: 'POST', headers: { cookie: `${SESSION_COOKIE_NAME}=bad` } }));
+    expect(badCookieResponse.headers.get('set-cookie')).toContain('Max-Age=0');
     const duplicate = `${SESSION_COOKIE_NAME}=abc; ${SESSION_COOKIE_NAME}=def`;
-    expect((await api.fetch(request('/api/auth/logout', { method: 'POST', headers: { cookie: duplicate } })).headers.get('set-cookie')).toContain('Max-Age=0');
+    const duplicateCookieResponse = await api.fetch(request('/api/auth/logout', { method: 'POST', headers: { cookie: duplicate } }));
+    expect(duplicateCookieResponse.headers.get('set-cookie')).toContain('Max-Age=0');
     const { cookie } = await sessionCookie(api); expect((await api.fetch(request('/api/auth/logout', { method: 'POST', headers: { cookie } }))).status).toBe(403);
     const session = await (await api.fetch(request('/api/auth/session', { headers: { cookie } }))).json();
     const response = await api.fetch(request('/api/auth/logout', { method: 'POST', headers: { cookie, 'x-csrf-token': session.csrfToken } }));
