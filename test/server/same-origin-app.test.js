@@ -26,9 +26,11 @@ describe('same-origin app and HTTP AuthClient', () => {
     expect((await app.fetch(new Request('https://app.example/%2e%2e/secret.js'))).status).not.toBe(200);
     app.backend.close();
   });
-  test('required mode gates the SPA and does not invent providers', async () => {
+  test('required mode serves the generic bootstrap and does not invent providers', async () => {
     const app = fixture('required');
-    expect((await app.fetch(new Request('https://app.example/'))).status).toBe(401);
+    const response = await app.fetch(new Request('https://app.example/'));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('/api/auth/providers');
     expect(await (await app.fetch(new Request('https://app.example/api/auth/providers'))).json()).toEqual([]);
     app.backend.close();
   });

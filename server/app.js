@@ -1,37 +1,16 @@
+import { realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { AUTH_MODES } from './auth/constants.js';
-
-const RUNTIME_MARKER = 'globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};';
-const TYPES = Object.freeze({ '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.html': 'text/html; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.woff2': 'font/woff2' });
-function extension(path) { const dot = path.lastIndexOf('.'); return dot < 0 ? '' : path.slice(dot).toLowerCase(); }
-function safePath(root, pathname) {
-  let decoded; try { decoded = decodeURIComponent(pathname); } catch { return null; }
-  if (decoded.includes('\0') || decoded.includes('\\')) return null;
-  const target = resolve(root, `.${decoded}`);
-  return target === root || target.startsWith(`${root}${sep}`) ? target : null;
-}
-async function serveIndex(root, mode) {
-  const file = Bun.file(resolve(root, 'index.html')); if (!await file.exists()) return new Response('Build output is missing', { status: 503 });
-  const source = await file.text();
-  const runtime = `globalThis.__NG_RUNTIME_CONFIG__=${JSON.stringify({ authMode: mode })};`;
-  return new Response(source.replace(RUNTIME_MARKER, runtime), { headers: { 'content-type': TYPES['.html'], 'cache-control': 'no-cache' } });
-}
-export function createAppHandler({ authBackend, config, distDirectory = resolve(process.cwd(), 'dist') }) {
-  const root = resolve(distDirectory);
-  return async function fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname.startsWith('/api/auth/')) return authBackend.fetch(request);
-    if (!['GET', 'HEAD'].includes(request.method)) return new Response('Not found', { status: 404 });
-    if (config.mode === AUTH_MODES.REQUIRED) {
-      const sessionRequest = new Request(new URL('/api/auth/session', url), { headers: { cookie: request.headers.get('cookie') || '' } });
-      const session = await authBackend.fetch(sessionRequest);
-      if (!session.ok) return Response.json({ error: { code: 'authentication_required' } }, { status: 401, headers: { 'cache-control': 'no-store' } });
-    }
-    if (url.pathname === '/') return serveIndex(root, config.mode);
-    const target = safePath(root, url.pathname); if (!target) return new Response('Bad request', { status: 400 });
-    const file = Bun.file(target);
-    if (await file.exists() && file.size > 0) return new Response(request.method === 'HEAD' ? null : file, { headers: { 'content-type': TYPES[extension(target)] || 'application/octet-stream' } });
-    if (!extension(url.pathname) && (request.headers.get('accept') || '').includes('text/html')) return serveIndex(root, config.mode);
-    return new Response('Not found', { status: 404 });
-  };
-}
+const RUNTIME_MARKER='globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};';
+const TYPES=Object.freeze({'.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.html':'text/html; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp','.woff2':'font/woff2','.txt':'text/plain; charset=utf-8'});
+const extension=path=>{const dot=path.lastIndexOf('.');return dot<0?'':path.slice(dot).toLowerCase();};
+const contained=(root,target)=>target===root||target.startsWith(`${root}${sep}`);
+function lexicalPath(root,pathname){let decoded;try{decoded=decodeURIComponent(pathname);}catch{return null;}if(decoded.includes('\0')||decoded.includes('\\'))return null;const target=resolve(root,`.${decoded}`);return contained(root,target)?target:null;}
+async function canonicalFile(root,target){try{const canonical=await realpath(target);return contained(root,canonical)?canonical:null;}catch{return null;}}
+const staticHeaders=(type,length,html=false)=>({'content-type':type,'content-length':String(length),'cache-control':html?'no-cache':'public, max-age=3600'});
+async function indexResponse(root,mode,method='GET'){const target=await canonicalFile(root,resolve(root,'index.html'));if(!target)return new Response('Build output is missing',{status:503});const file=Bun.file(target);const source=await file.text();const body=source.replace(RUNTIME_MARKER,`globalThis.__NG_RUNTIME_CONFIG__=${JSON.stringify({authMode:mode})};`);return new Response(method==='HEAD'?null:body,{headers:staticHeaders(TYPES['.html'],Buffer.byteLength(body),true)});}
+function loginBootstrap(method='GET') { const body='<!doctype html><meta charset="utf-8"><title>Sign in</title><main><h1>Sign in</h1><div id="providers">Loading…</div></main><script>fetch("/api/auth/providers",{credentials:"same-origin"}).then(r=>r.json()).then(ps=>{providers.replaceChildren(...ps.map(p=>{const a=document.createElement("a");a.textContent=p.displayName;a.href="/api/auth/login/"+encodeURIComponent(p.id)+"?returnPath=%2F";return a;}));});</script>'; return new Response(method==='HEAD'?null:body,{headers:staticHeaders(TYPES['.html'],Buffer.byteLength(body),true)}); }
+export function createAppHandler({authBackend,config,distDirectory=resolve(process.cwd(),'dist')}){const lexicalRoot=resolve(distDirectory);const canonicalRootPromise=realpath(lexicalRoot).catch(()=>lexicalRoot);return async function fetch(request){const url=new URL(request.url);if(url.pathname.startsWith('/api/auth/'))return authBackend.fetch(request);if(!['GET','HEAD'].includes(request.method))return new Response('Not found',{status:404});if(config.mode===AUTH_MODES.REQUIRED){const session=await authBackend.fetch(new Request(new URL('/api/auth/session',url),{headers:{cookie:request.headers.get('cookie')||''}}));if(!session.ok)return url.pathname==='/'?loginBootstrap(request.method):Response.json({error:{code:'authentication_required'}},{status:401,headers:{'cache-control':'no-store'}});}const root=await canonicalRootPromise;if(url.pathname==='/')return indexResponse(root,config.mode,request.method);const lexical=lexicalPath(lexicalRoot,url.pathname);if(!lexical)return new Response('Bad request',{status:400});const target=await canonicalFile(root,lexical);if(target){const file=Bun.file(target);if(await file.exists()&&file.type!=='application/x-directory'){const headers=staticHeaders(TYPES[extension(target)]||'application/octet-stream',file.size);return new Response(request.method==='HEAD'?null:file,{headers});}}
+// Never turn a path passing through a symlink into an SPA fallback.
+let parent=lexical;while(parent!==lexicalRoot){parent=resolve(parent,'..');try{const canonicalParent=await realpath(parent);if(!contained(root,canonicalParent))return new Response('Not found',{status:404});}catch{}}
+if(!extension(url.pathname)&&(request.headers.get('accept')||'').includes('text/html'))return indexResponse(root,config.mode,request.method);return new Response('Not found',{status:404});};}
