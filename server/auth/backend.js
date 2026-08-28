@@ -58,10 +58,28 @@ function validateAdapterContext(value, seen = new WeakSet()) {
   seen.add(value);
 
   if (Array.isArray(value)) {
-    if (Object.keys(value).length !== value.length) throw new TypeError('Invalid adapter context');
+    if (Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError('Unsupported adapter context');
+    if (Object.getOwnPropertySymbols(value).length > 0) throw new TypeError('Unsupported adapter context');
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const lengthDescriptor = descriptors.length;
+    if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') || lengthDescriptor.get || lengthDescriptor.set || lengthDescriptor.enumerable || typeof lengthDescriptor.value !== 'number' || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 || lengthDescriptor.value > 0xffffffff) throw new TypeError('Invalid adapter context');
     for (let index = 0; index < value.length; index += 1) {
-      if (!Object.prototype.hasOwnProperty.call(value, index)) throw new TypeError('Invalid adapter context');
-      validateAdapterContext(value[index], seen);
+      const key = String(index);
+      const descriptor = descriptors[key];
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') || descriptor.get || descriptor.set || !descriptor.enumerable) throw new TypeError('Invalid adapter context');
+      validateAdapterContext(descriptor.value, seen);
+    }
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (key === 'length') {
+        if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') || descriptor.get || descriptor.set || descriptor.enumerable || !Number.isSafeInteger(descriptor.value) || descriptor.value !== value.length) {
+          throw new TypeError('Invalid adapter context');
+        }
+        continue;
+      }
+      const index = Number(key);
+      if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) throw new TypeError('Invalid adapter context');
+      const entry = descriptors[key];
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'value') || entry.get || entry.set) throw new TypeError('Invalid adapter context');
     }
     return true;
   }
@@ -273,6 +291,10 @@ export function createAuthBackend(options = {}) {
         if (!provider) return fail(404, 'provider_not_found');
         const returnPath = validateReturnPath(url.searchParams.get('returnPath') || '/');
         if (!returnPath) return fail(400, 'invalid_return_path');
+        const staleSession = (() => {
+          const captured = readSessionCapture(request);
+          return captured.hasCookie && captured.row === null;
+        })();
         const now = clock();
         const state = token(randomBytes, SESSION_TOKEN_BYTES);
         let authorization;
@@ -289,6 +311,7 @@ export function createAuthBackend(options = {}) {
         }
         database.run('INSERT INTO login_transactions (id, state_hash, provider_id, return_path, adapter_context, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)', [makeId(randomBytes), keyedHash('login-state', state), providerId, returnPath, context, now, now + LOGIN_STATE_DURATION_MS]);
         const headers = new Headers({ location, 'cache-control': 'no-store' });
+        if (staleSession) headers.append('set-cookie', setCookie(SESSION_COOKIE_NAME, '', 0));
         headers.append('set-cookie', setCookie(LOGIN_STATE_COOKIE_NAME, state, LOGIN_STATE_DURATION_MS / 1000, 'None'));
         return new Response(null, { status: 302, headers });
       }
@@ -299,8 +322,11 @@ export function createAuthBackend(options = {}) {
         return provider ? handleCallback(request, provider, providerId) : fail(404, 'provider_not_found');
       }
       if (url.pathname === AUTH_ROUTES.LOGOUT && request.method === 'POST') {
-        const session = readSession(request);
-        if (!session) return fail(401, 'invalid_session');
+        const sessionCapture = readSessionCapture(request);
+        if (!sessionCapture.row) {
+          return json({ error: { code: 'invalid_session' } }, 401, { ...JSON_HEADERS, 'set-cookie': setCookie(SESSION_COOKIE_NAME, '', 0) });
+        }
+        const session = { row: sessionCapture.row, raw: sessionCapture.raw };
         const csrf = request.headers.get('x-csrf-token') || '';
         if (!csrf || !safelyEqual(keyedHash('csrf', csrf), session.row.csrf_hash)) return fail(403, 'csrf_rejected');
         database.run('UPDATE sessions SET revoked_at = ? WHERE id = ?', [clock(), session.row.session_id]);

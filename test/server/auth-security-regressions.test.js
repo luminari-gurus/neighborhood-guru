@@ -10,6 +10,7 @@ const randomBytes = (length) => Uint8Array.from({ length }, (_, i) => (i + ++see
 const config = (secret = 'a'.repeat(32)) => ({ mode: 'optional', secret, databasePath: ':memory:', production: false });
 const req = (path, init) => new Request(`https://app.example${path}`, init);
 const cookieValue = (response, name) => response.headers.getSetCookie().map((value) => value.match(new RegExp(`^${name}=([^;]*)`))?.[1]).find(Boolean);
+const cookieValues = (response, name) => response.headers.getSetCookie().map((value) => value.match(new RegExp(`^${name}=([^;]*)`))?.[1]).filter(Boolean);
 const callbackHeaders = (state, session) => ({ cookie: `${LOGIN_STATE_COOKIE_NAME}=${state}${session ? `; ${SESSION_COOKIE_NAME}=${session}` : ""}` });
 const provider = (id = 'generic', overrides = {}) => ({ id, displayName: id, createAuthorizationUrl: async ({ state }) => `https://id.example/auth?state=${state}`, exchangeCallback: async () => ({ identity: { issuer: 'https://id.example', subject: 'subject' }, user: { displayName: 'Ada', email: null, avatarUrl: null }, returnPath: '/evil' }), ...overrides });
 function backend(options = {}) { const database = options.database || new Database(':memory:'); databases.push(database); return createAuthBackend({ config: config(), database, clock: () => NOW, randomBytes, providers: [provider()], ...options }); }
@@ -62,6 +63,28 @@ describe('login transaction security regressions', () => {
     apiA.database.run("INSERT INTO users VALUES (?,NULL,NULL,NULL,?,?)", ["existing", NOW, NOW]); const issued = apiA.issueSession("existing");
     expect(await (await apiRotated.fetch(req("/api/auth/session", { headers: { cookie: `${SESSION_COOKIE_NAME}=${issued.raw}` } }))).json()).toBeNull();
   });
+  test('secret rotation clears stale session cookies on login but still fails callback when stale cookie remains', async () => {
+    const shared = new Database(':memory:'); databases.push(shared);
+    const oldApi = createAuthBackend({ config: config('a'.repeat(32)), database: shared, clock: () => NOW, randomBytes, providers: [provider()] });
+    oldApi.database.run("INSERT INTO users VALUES (?,NULL,NULL,NULL,?,?)", ["existing", NOW, NOW]);
+    const stale = oldApi.issueSession("existing");
+    const rotated = createAuthBackend({ config: config('b'.repeat(32)), database: shared, clock: () => NOW, randomBytes, providers: [provider()] });
+    const staleLogin = await rotated.fetch(req('/api/auth/login/generic'), { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}` } });
+    const staleLoginState = cookieValue(staleLogin, LOGIN_STATE_COOKIE_NAME);
+    const staleLoginClears = cookieValues(staleLogin, SESSION_COOKIE_NAME);
+    expect(staleLoginClears).toHaveLength(1);
+    expect(staleLoginClears[0]).toContain('Max-Age=0');
+    expect(staleLoginState).toBeString();
+    expect((await rotated.fetch(req(`/api/auth/callback/generic?state=${staleLoginState}`, { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}; ${LOGIN_STATE_COOKIE_NAME}=${staleLoginState}` } })).status).toBe(400);
+    const cleanLogin = await rotated.fetch(req('/api/auth/login/generic'), { headers: { cookie: `${SESSION_COOKIE_NAME}=${stale.raw}` } });
+    const cleanStateValue = cookieValue(cleanLogin, LOGIN_STATE_COOKIE_NAME);
+    expect(cookieValues(cleanLogin, SESSION_COOKIE_NAME)).toHaveLength(1);
+    const cleanCallback = await rotated.fetch(req(`/api/auth/callback/generic?state=${cleanStateValue}`, { headers: { cookie: `${LOGIN_STATE_COOKIE_NAME}=${cleanStateValue}` } }));
+    expect(cleanCallback.status).toBe(302);
+    const newSession = cookieValue(cleanCallback, SESSION_COOKIE_NAME);
+    expect(newSession).toBeString();
+    expect((await rotated.fetch(req('/api/auth/session', { headers: { cookie: `${SESSION_COOKIE_NAME}=${newSession}` } })).status).toBe(200);
+  });
   test('invalid provider scalars and oversized fields are rejected before writes', async () => {
     for (const result of [
       { identity: { issuer: 'relative', subject: 's' }, user: {} },
@@ -76,12 +99,24 @@ describe('login transaction security regressions', () => {
   test('adapter context must be strict and preserve exact accepted values', async () => {
     const captured = [];
     const api = backend({ providers: [provider('generic', {
-      createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: { nested: { enabled: true, value: null }, tags: [1, true, null, 'ok'], numbers: [1, 2.5] } }),
+      createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: { nested: { enabled: true, value: null }, tags: [1, true, null, 'ok'], matrix: [[1, 2], [3, [4, 5]], ['x', 'y']] } }),
       exchangeCallback: async ({ context }) => { captured.push(context); return { identity: { issuer: 'https://id.example', subject: 'subject' }, user: { displayName: 'Ada', email: null, avatarUrl: null }, returnPath: '/owned' }; },
     })] });
     const state = await login(api);
     expect((await api.fetch(req(`/api/auth/callback/generic?state=${state}`, { headers: callbackHeaders(state) }))).status).toBe(302);
-    expect(captured).toEqual([{ nested: { enabled: true, value: null }, tags: [1, true, null, 'ok'], numbers: [1, 2.5] }]);
+    expect(captured).toEqual([{ nested: { enabled: true, value: null }, tags: [1, true, null, 'ok'], matrix: [[1, 2], [3, [4, 5]], ['x', 'y']] }]);
+  });
+  test('adapter context rejects array index getters without executing them and rejects array subclasses', async () => {
+    let calls = 0;
+    const getterArray = [];
+    Object.defineProperty(getterArray, '0', { enumerable: true, configurable: true, get() { calls += 1; return 1; } });
+    expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: getterArray }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(502);
+    expect(calls).toBe(0);
+
+    class ArraySubclass extends Array {}
+    const subclass = new ArraySubclass(1);
+    subclass[0] = 1;
+    expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: subclass }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(502);
   });
   test('rejects Map and multibyte boundary context limits', async () => {
     const mapContext = backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: new Map([['legacy', 'value']]) }) })] });
