@@ -7,9 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "server": "bun server/index.js",
     "test": "bun test"
-  },
-  "dependencies": {
+  },  "dependencies": {
     "mapbox-gl": "^3.9.0"
   },
   "devDependencies": {

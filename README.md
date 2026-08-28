@@ -93,10 +93,15 @@
    bun run build
    ```
 
+### Optional authentication backend
+
+The static, local-first app remains the default and does not require a backend. A small same-origin Bun server can be enabled with `AUTH_MODE=optional` or `AUTH_MODE=required`; `AUTH_MODE=disabled` is the default. Copy the placeholder-only schema in `.env.example`, use a persistent SQLite path and a random secret of at least 32 characters in production, then run `bun run server`.
+
+The backend exposes provider discovery, session, provider-neutral login/callback, and CSRF-protected logout routes under `/api/auth`. No concrete identity provider is bundled: deployments register adapters that implement `createAuthorizationUrl` and `exchangeCallback`. Provider tokens must remain inside adapters and must never be returned to browser JavaScript. Authentication data consists of user profile records, identities uniquely keyed by `(issuer, subject)`, and hashed opaque application sessions.
+
 ---
 
 ## 📂 Project Structure
-
 ```
 neighborhood-guru/
 ├── index.html              # Main HTML application markup & modals
