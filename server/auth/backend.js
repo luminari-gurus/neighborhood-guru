@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { types as utilTypes } from 'node:util';
 import {
   AUTH_MODES, AUTH_ROUTES, COOKIE_ATTRIBUTES, HMAC_ALGORITHM,
   LOGIN_STATE_COOKIE_NAME, LOGIN_STATE_DURATION_MS, MAX_ADAPTER_CONTEXT_BYTES,
@@ -54,6 +55,9 @@ function validateAdapterContext(value, seen = new WeakSet()) {
   if (typeof value === 'number' || typeof value === 'undefined' || typeof value === 'symbol' || typeof value === 'bigint' || typeof value === 'function') {
     throw new TypeError('Unsupported adapter context');
   }
+  if (utilTypes.isProxy(value)) {
+    throw new TypeError('Unsupported adapter context');
+  }
   if (seen.has(value)) throw new TypeError('Circular adapter context');
   seen.add(value);
 
@@ -62,24 +66,41 @@ function validateAdapterContext(value, seen = new WeakSet()) {
     if (Object.getOwnPropertySymbols(value).length > 0) throw new TypeError('Unsupported adapter context');
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const lengthDescriptor = descriptors.length;
-    if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') || lengthDescriptor.get || lengthDescriptor.set || lengthDescriptor.enumerable || typeof lengthDescriptor.value !== 'number' || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 || lengthDescriptor.value > 0xffffffff) throw new TypeError('Invalid adapter context');
+    if (!lengthDescriptor
+      || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+      || lengthDescriptor.get
+      || lengthDescriptor.set
+      || lengthDescriptor.enumerable
+      || lengthDescriptor.writable !== true
+      || lengthDescriptor.configurable !== false
+      || typeof lengthDescriptor.value !== 'number'
+      || !Number.isSafeInteger(lengthDescriptor.value)
+      || lengthDescriptor.value < 0
+      || lengthDescriptor.value > 0xffffffff
+      || lengthDescriptor.value !== value.length) {
+      throw new TypeError('Invalid adapter context');
+    }
     for (let index = 0; index < value.length; index += 1) {
       const key = String(index);
       const descriptor = descriptors[key];
-      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') || descriptor.get || descriptor.set || !descriptor.enumerable) throw new TypeError('Invalid adapter context');
+      if (!descriptor
+        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        || descriptor.get
+        || descriptor.set
+        || descriptor.enumerable !== true
+        || descriptor.writable !== true
+        || descriptor.configurable !== true) {
+        throw new TypeError('Invalid adapter context');
+      }
       validateAdapterContext(descriptor.value, seen);
     }
     for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (key === 'length') {
-        if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') || descriptor.get || descriptor.set || descriptor.enumerable || !Number.isSafeInteger(descriptor.value) || descriptor.value !== value.length) {
-          throw new TypeError('Invalid adapter context');
-        }
-        continue;
+      if (key === 'length') continue;
+      if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') || descriptor.get || descriptor.set) {
+        throw new TypeError('Invalid adapter context');
       }
       const index = Number(key);
       if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) throw new TypeError('Invalid adapter context');
-      const entry = descriptors[key];
-      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'value') || entry.get || entry.set) throw new TypeError('Invalid adapter context');
     }
     return true;
   }

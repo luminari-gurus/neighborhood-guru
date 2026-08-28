@@ -120,6 +120,78 @@ describe('login transaction security regressions', () => {
     subclass[0] = 1;
     expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: subclass }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(502);
   });
+  test('adapter context rejects proxy arrays and plain object proxies without triggering traps', async () => {
+    const makeTrapCounts = () => ({ ownKeys: 0, getOwnPropertyDescriptor: 0, get: 0 });
+    const makeArrayProxy = () => {
+      const counts = makeTrapCounts();
+      const target = [1];
+      const context = new Proxy(target, {
+        ownKeys() { counts.ownKeys += 1; return Reflect.ownKeys(target); },
+        getOwnPropertyDescriptor(targetKey, key) { counts.getOwnPropertyDescriptor += 1; return Reflect.getOwnPropertyDescriptor(targetKey, key); },
+        get(targetKey, key, receiver) { counts.get += 1; return Reflect.get(targetKey, key, receiver); },
+      });
+      return { context, counts };
+    };
+    const makeObjectProxy = () => {
+      const counts = makeTrapCounts();
+      const target = { value: 1 };
+      const context = new Proxy(target, {
+        ownKeys() { counts.ownKeys += 1; return Reflect.ownKeys(target); },
+        getOwnPropertyDescriptor(targetKey, key) { counts.getOwnPropertyDescriptor += 1; return Reflect.getOwnPropertyDescriptor(targetKey, key); },
+        get(targetKey, key, receiver) { counts.get += 1; return Reflect.get(targetKey, key, receiver); },
+      });
+      return { context, counts };
+    };
+
+    const arrayProxy = makeArrayProxy();
+    expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: arrayProxy.context }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(502);
+    expect(arrayProxy.counts).toEqual({ ownKeys: 0, getOwnPropertyDescriptor: 0, get: 0 });
+
+    const objectProxy = makeObjectProxy();
+    expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: objectProxy.context }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(502);
+    expect(objectProxy.counts).toEqual({ ownKeys: 0, getOwnPropertyDescriptor: 0, get: 0 });
+  });
+  test('adapter context rejects arrays that are not strict ordinary dense structures', async () => {
+    const cases = [
+      () => {
+        const value = [1];
+        Object.defineProperty(value, 'length', { configurable: true, writable: false, enumerable: false, value: 1 });
+        return value;
+      },
+      () => {
+        const value = [1];
+        Object.defineProperty(value, '0', { configurable: true, enumerable: true, writable: false, value: 1 });
+        return value;
+      },
+      () => {
+        const value = [1];
+        Object.defineProperty(value, '0', { configurable: false, enumerable: true, writable: true, value: 1 });
+        return value;
+      },
+      () => {
+        const value = [];
+        value.length = 1;
+        return value;
+      },
+      () => {
+        const value = [1];
+        Object.defineProperty(value, 'extra', { value: 1, configurable: true, writable: true, enumerable: true });
+        return value;
+      },
+      () => {
+        const value = [1];
+        Object.defineProperty(value, '0', { configurable: true, enumerable: true, get() { return 1; }, });
+        return value;
+      },
+    ];
+
+    for (const createContext of cases) {
+      const api = backend({ providers: [provider('generic', {
+        createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: createContext() }),
+      })] });
+      expect((await api.fetch(req('/api/auth/login/generic'))).status).toBe(502);
+    }
+  });
   test('rejects Map and multibyte boundary context limits', async () => {
     const mapContext = backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: new Map([['legacy', 'value']]) }) })] });
     expect((await mapContext.fetch(req('/api/auth/login/generic'))).status).toBe(502);
