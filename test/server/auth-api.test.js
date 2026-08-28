@@ -53,7 +53,7 @@ describe('provider discovery and login', () => {
     const response = await backend().fetch(request('/api/auth/login/generic?returnPath=%2Fmap%3Ftab%3Dnearby'));
     expect(response.status).toBe(302); expect(response.headers.get('location')).toContain('identity.example/authorize');
     const header = response.headers.get('set-cookie');
-    expect(header).toContain(`${LOGIN_STATE_COOKIE_NAME}=`); expect(header).toContain('HttpOnly'); expect(header).toContain('Secure'); expect(header).toContain('SameSite=Lax');
+    expect(header).toContain(`${LOGIN_STATE_COOKIE_NAME}=`); expect(header).toContain('HttpOnly'); expect(header).toContain('Secure'); expect(header).toContain('SameSite=None');
   });
   test('rejects unknown providers, open redirects, and adapter failures without secrets', async () => {
     const api = backend({ providers: [fakeProvider({ createAuthorizationUrl: async () => { throw new Error('client-secret-value'); } })] });

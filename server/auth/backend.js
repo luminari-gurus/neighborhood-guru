@@ -15,7 +15,7 @@ const encode = (bytes) => Buffer.from(bytes).toString('base64url');
 const token = (randomBytes, length) => encode(randomBytes(length));
 const json = (body, status = 200, headers = {}) => Response.json(body, { status, headers: { ...JSON_HEADERS, ...headers } });
 const fail = (status, code) => json({ error: { code } }, status);
-const setCookie = (name, value, maxAge) => `${name}=${value}; Path=${COOKIE_ATTRIBUTES.path}; HttpOnly; Secure; SameSite=${COOKIE_ATTRIBUTES.sameSite}; Max-Age=${maxAge}`;
+const setCookie = (name, value, maxAge, sameSite = COOKIE_ATTRIBUTES.sameSite) => `${name}=${value}; Path=${COOKIE_ATTRIBUTES.path}; HttpOnly; Secure; SameSite=${sameSite}; Max-Age=${maxAge}`;
 const makeId = (randomBytes) => token(randomBytes, 18);
 function secureRandom(length) { return crypto.getRandomValues(new Uint8Array(length)); }
 
@@ -36,14 +36,29 @@ function decodeProviderId(pathname, prefix) {
   try { return decodeURIComponent(pathname.slice(prefix.length)); } catch { return undefined; }
 }
 
-function normalizeProviderResult(result) {
+function isLoopback(hostname) { return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'; }
+function secureAbsoluteUrl(value, production) {
+  if (typeof value !== 'string' || value.length > 8192 || /[\r\n]/.test(value)) return null;
+  try { const url = new URL(value); if (url.username || url.password || (url.protocol !== 'https:' && !(url.protocol === 'http:' && !production && isLoopback(url.hostname)))) return null; return url; } catch { return null; }
+}
+function serializeContext(value) {
+  const seen = new WeakSet();
+  const serialized = JSON.stringify(value, (_key, item) => {
+    if (typeof item === "bigint" || typeof item === "function" || typeof item === "symbol" || typeof item === "undefined" || (typeof item === "number" && !Number.isFinite(item))) throw new TypeError("Unsupported adapter context");
+    if (item && typeof item === "object") { if (seen.has(item)) throw new TypeError("Circular adapter context"); seen.add(item); }
+    return item;
+  });
+  if (serialized === undefined || serialized.length > 65536) throw new TypeError("Invalid adapter context");
+  return serialized;
+}
+function normalizeProviderResult(result, production) {
   const issuerValue = result?.identity?.issuer;
   const subject = result?.identity?.subject;
-  if (typeof issuerValue !== 'string' || !issuerValue || issuerValue.length > MAX_ISSUER_LENGTH || typeof subject !== 'string' || !subject || subject.length > MAX_SUBJECT_LENGTH) return null;
+  if (typeof issuerValue !== 'string' || !issuerValue || issuerValue.length > MAX_ISSUER_LENGTH || typeof subject !== 'string' || !subject.trim() || subject.length > MAX_SUBJECT_LENGTH) return null;
   let issuer;
   try {
     const url = new URL(issuerValue);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+    if (!secureAbsoluteUrl(issuerValue, production) || url.search || url.hash) return null;
     issuer = url.href;
   } catch { return null; }
   if (!result.user || typeof result.user !== 'object' || Array.isArray(result.user)) return null;
@@ -89,28 +104,32 @@ export function createAuthBackend(options = {}) {
   async function handleCallback(request, provider, providerId) {
     const url = new URL(request.url);
     let form = null;
+    const contentLength = request.headers.get("content-length");
+    if (request.method === "POST" && contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > 65536)) return fail(413, "callback_body_too_large");
     try { form = request.method === 'POST' ? await request.clone().formData() : null; } catch { return fail(400, 'invalid_callback_state'); }
     const stateValue = request.method === 'POST' ? form?.get('state') : url.searchParams.get('state');
     const state = typeof stateValue === 'string' ? stateValue : '';
     if (!TOKEN_PATTERN.test(state) || state.length > MAX_COOKIE_VALUE_LENGTH) return fail(400, 'invalid_callback_state');
-    if (request.method === 'GET') {
-      const cookieState = readSecurityCookie(request, LOGIN_STATE_COOKIE_NAME);
-      if (cookieState === null || (typeof cookieState === 'string' && !safelyEqual(state, cookieState))) return fail(400, 'invalid_callback_state');
-    }
+    const cookieState = readSecurityCookie(request, LOGIN_STATE_COOKIE_NAME);
+    if (typeof cookieState !== 'string' || !safelyEqual(state, cookieState)) return fail(400, 'invalid_callback_state');
     const stateHash = keyedHash('login-state', state);
     const pending = database.query('SELECT provider_id, return_path, adapter_context, expires_at, consumed_at FROM login_transactions WHERE state_hash = ?').get(stateHash);
     if (!pending || pending.provider_id !== providerId || pending.consumed_at !== null || pending.expires_at <= clock()) return fail(400, 'invalid_callback_state');
+    const claimedAt = clock();
+    try {
+      const claimed = database.transaction(() => database.run('UPDATE login_transactions SET consumed_at = ? WHERE state_hash = ? AND provider_id = ? AND consumed_at IS NULL AND expires_at > ?', [claimedAt, stateHash, providerId, claimedAt])).immediate();
+      if (claimed.changes !== 1) return fail(400, 'invalid_callback_state');
+    } catch { return fail(500, 'auth_internal_error'); }
+    let context; try { if (pending.adapter_context !== null && pending.adapter_context.length > 65536) throw new Error(); context = pending.adapter_context === null ? null : JSON.parse(pending.adapter_context); } catch { return fail(400, 'invalid_callback_state'); }
     let result;
-    try { result = await provider.exchangeCallback({ request, url, context: pending.adapter_context }); } catch { return fail(400, 'provider_callback_failed'); }
-    const normalized = normalizeProviderResult(result);
+    try { result = await provider.exchangeCallback({ request, url, context }); } catch { return fail(400, 'provider_callback_failed'); }
+    const normalized = normalizeProviderResult(result, config.production);
     if (!normalized) return fail(400, 'invalid_provider_response');
     const previous = readSession(request);
     const now = clock();
     const replacement = newSession(null, now);
     try {
       database.transaction(() => {
-        const consumed = database.run('UPDATE login_transactions SET consumed_at = ? WHERE state_hash = ? AND provider_id = ? AND consumed_at IS NULL AND expires_at > ?', [now, stateHash, providerId, now]);
-        if (consumed.changes !== 1) throw new Error('LOGIN_TRANSACTION_CONSUMED');
         let identity = database.query('SELECT user_id FROM external_identities WHERE issuer = ? AND subject = ?').get(normalized.issuer, normalized.subject);
         let userId = identity?.user_id;
         if (!userId) {
@@ -120,18 +139,18 @@ export function createAuthBackend(options = {}) {
         } else {
           database.run('UPDATE users SET display_name = ?, email = ?, avatar_url = ?, updated_at = ? WHERE id = ?', [normalized.user.displayName, normalized.user.email, normalized.user.avatarUrl, now, userId]);
         }
-        if (previous) database.run('UPDATE sessions SET revoked_at = ? WHERE id = ?', [now, previous.row.session_id]);
+        if (previous) { const revoked = database.run('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', [now, previous.row.session_id]); if (revoked.changes !== 1) throw new Error('SESSION_ROTATION_LOST'); }
         replacement.userId = userId;
         database.run('INSERT INTO sessions (id, user_id, token_hash, csrf_hash, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)', [replacement.id, userId, replacement.tokenHash, replacement.csrfHash, replacement.expiresAt, now]);
         options.beforeCallbackCommit?.({ database, userId, replacement });
       }).immediate();
     } catch (error) {
-      if (error?.message === 'LOGIN_TRANSACTION_CONSUMED') return fail(400, 'invalid_callback_state');
+      if (error?.message === 'LOGIN_TRANSACTION_CONSUMED' || error?.message === 'SESSION_ROTATION_LOST') return fail(400, 'invalid_callback_state');
       return fail(500, 'auth_internal_error');
     }
     const headers = new Headers({ location: pending.return_path, 'cache-control': 'no-store' });
     headers.append('set-cookie', setCookie(SESSION_COOKIE_NAME, replacement.raw, SESSION_DURATION_MS / 1000));
-    headers.append('set-cookie', setCookie(LOGIN_STATE_COOKIE_NAME, '', 0));
+    headers.append('set-cookie', setCookie(LOGIN_STATE_COOKIE_NAME, '', 0, 'None'));
     return new Response(null, { status: 302, headers });
   }
 
@@ -157,11 +176,12 @@ export function createAuthBackend(options = {}) {
         let authorization;
         try { authorization = await provider.createAuthorizationUrl({ state, returnPath }); } catch { return fail(502, 'provider_login_failed'); }
         const location = typeof authorization === 'string' ? authorization : authorization?.location;
-        const context = typeof authorization === 'object' && authorization?.context != null ? JSON.stringify(authorization.context) : null;
-        if (typeof location !== 'string') return fail(502, 'provider_login_failed');
+        if (!secureAbsoluteUrl(location, config.production)) return fail(502, 'provider_login_failed');
+        let context = null;
+        if (typeof authorization === 'object' && authorization?.context !== undefined) { try { context = serializeContext(authorization.context); } catch { return fail(502, 'provider_login_failed'); } }
         database.run('INSERT INTO login_transactions (id, state_hash, provider_id, return_path, adapter_context, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)', [makeId(randomBytes), keyedHash('login-state', state), providerId, returnPath, context, now, now + LOGIN_STATE_DURATION_MS]);
         const headers = new Headers({ location, 'cache-control': 'no-store' });
-        headers.append('set-cookie', setCookie(LOGIN_STATE_COOKIE_NAME, state, LOGIN_STATE_DURATION_MS / 1000));
+        headers.append('set-cookie', setCookie(LOGIN_STATE_COOKIE_NAME, state, LOGIN_STATE_DURATION_MS / 1000, 'None'));
         return new Response(null, { status: 302, headers });
       }
       if (url.pathname.startsWith(AUTH_ROUTES.CALLBACK_PREFIX) && (request.method === 'GET' || request.method === 'POST')) {

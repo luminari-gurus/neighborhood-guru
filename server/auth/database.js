@@ -23,21 +23,37 @@ const MIGRATIONS = new Map([
 ]);
 
 const REQUIRED = Object.freeze({
-  users: ['id', 'display_name', 'email', 'avatar_url', 'created_at', 'updated_at'],
-  external_identities: ['id', 'user_id', 'issuer', 'subject', 'created_at', 'updated_at'],
-  sessions: ['id', 'user_id', 'token_hash', 'csrf_hash', 'expires_at', 'revoked_at', 'created_at'],
-  login_transactions: ['id', 'state_hash', 'provider_id', 'return_path', 'adapter_context', 'created_at', 'expires_at', 'consumed_at'],
+  users: { id: ["TEXT", 1, 1], display_name: ["TEXT", 0, 0], email: ["TEXT", 0, 0], avatar_url: ["TEXT", 0, 0], created_at: ["INTEGER", 1, 0], updated_at: ["INTEGER", 1, 0] },
+  external_identities: { id: ["TEXT", 1, 1], user_id: ["TEXT", 1, 0], issuer: ["TEXT", 1, 0], subject: ["TEXT", 1, 0], created_at: ["INTEGER", 1, 0], updated_at: ["INTEGER", 1, 0] },
+  sessions: { id: ["TEXT", 1, 1], user_id: ["TEXT", 1, 0], token_hash: ["TEXT", 1, 0], csrf_hash: ["TEXT", 1, 0], expires_at: ["INTEGER", 1, 0], revoked_at: ["INTEGER", 0, 0], created_at: ["INTEGER", 1, 0] },
+  login_transactions: { id: ["TEXT", 1, 1], state_hash: ["TEXT", 1, 0], provider_id: ["TEXT", 1, 0], return_path: ["TEXT", 1, 0], adapter_context: ["TEXT", 0, 0], created_at: ["INTEGER", 1, 0], expires_at: ["INTEGER", 1, 0], consumed_at: ["INTEGER", 0, 0] },
 });
-
+const UNIQUE = Object.freeze({ external_identities: [["issuer", "subject"]], sessions: [["token_hash"]], login_transactions: [["state_hash"]] });
+const INDEXES = Object.freeze({ sessions_user_id_idx: ["sessions", ["user_id"]], login_transactions_expires_at_idx: ["login_transactions", ["expires_at"]] });
+function pragma(database, sql) { return database.query(sql).all(); }
+function columnsOf(database, index) { return pragma(database, `PRAGMA index_info(${JSON.stringify(index)})`).sort((x, y) => x.seqno - y.seqno).map((row) => row.name); }
+function sameColumns(left, right) { return left.length === right.length && left.every((value, index) => value === right[index]); }
+function malformed(detail) { throw new Error(`Authentication schema is malformed: ${detail}`); }
 function verifySchema(database) {
-  for (const [table, columns] of Object.entries(REQUIRED)) {
-    const actual = new Set(database.query(`PRAGMA table_info(${table})`).all().map(({ name }) => name));
-    if (columns.some((column) => !actual.has(column))) throw new Error(`Authentication schema is malformed: ${table}`);
+  for (const [table, expected] of Object.entries(REQUIRED)) {
+    const rows = pragma(database, `PRAGMA table_info(${JSON.stringify(table)})`);
+    if (rows.length !== Object.keys(expected).length) malformed(table);
+    for (const row of rows) {
+      const specification = expected[row.name];
+      if (!specification || row.type.toUpperCase() !== specification[0] || (row.name !== "id" && row.notnull !== specification[1]) || row.pk !== specification[2]) malformed(`${table}.${row.name}`);
+    }
   }
-  const identitySql = database.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='external_identities'").get()?.sql || '';
-  const transactionSql = database.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='login_transactions'").get()?.sql || '';
-  if (!/UNIQUE\s*\(\s*issuer\s*,\s*subject\s*\)/i.test(identitySql) || !/state_hash\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(transactionSql)) {
-    throw new Error('Authentication schema constraints are malformed');
+  for (const table of ["external_identities", "sessions"]) {
+    const foreignKeys = pragma(database, `PRAGMA foreign_key_list(${JSON.stringify(table)})`);
+    if (!foreignKeys.some((key) => key.from === "user_id" && key.table === "users" && key.to === "id" && key.on_delete.toUpperCase() === "CASCADE")) malformed(`${table} foreign key`);
+  }
+  for (const [table, groups] of Object.entries(UNIQUE)) {
+    const indexes = pragma(database, `PRAGMA index_list(${JSON.stringify(table)})`);
+    for (const group of groups) if (!indexes.some((index) => index.unique === 1 && sameColumns(columnsOf(database, index.name), group))) malformed(`${table} unique`);
+  }
+  for (const [name, [table, columns]] of Object.entries(INDEXES)) {
+    const index = pragma(database, `PRAGMA index_list(${JSON.stringify(table)})`).find((entry) => entry.name === name);
+    if (!index || !sameColumns(columnsOf(database, name), columns)) malformed(name);
   }
 }
 
