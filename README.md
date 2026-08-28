@@ -95,9 +95,13 @@
 
 ### Optional authentication backend
 
-The static, local-first app remains the default and does not require a backend. A small same-origin Bun server can be enabled with `AUTH_MODE=optional` or `AUTH_MODE=required`; `AUTH_MODE=disabled` is the default. Copy the placeholder-only schema in `.env.example`, use a persistent SQLite path and a random secret of at least 32 characters in production, then run `bun run server`.
+The static, local-first build remains the default: its injected runtime mode is `disabled`, it constructs the anonymous AuthClient, and it makes zero authentication requests. `bun run server` serves `dist/` and `/api/auth` on one origin. Set `AUTH_MODE=optional` to serve the app anonymously with auth available, or `AUTH_MODE=required` to return `401 authentication_required` for SPA/static requests without a valid session. Required mode does not invent a login provider; deployments must register at least one adapter before users can authenticate.
 
-The backend exposes provider discovery, session, provider-neutral login/callback, and CSRF-protected logout routes under `/api/auth`. No concrete identity provider is bundled: deployments register adapters that implement `createAuthorizationUrl` and `exchangeCallback`. Provider tokens must remain inside adapters and must never be returned to browser JavaScript. Authentication data consists of user profile records, identities uniquely keyed by `(issuer, subject)`, and hashed opaque application sessions.
+For local same-origin development, run the Bun server on port 3000 and Vite separately; Vite proxies `/api/auth` to `AUTH_DEV_SERVER` (default `http://localhost:3000`). The production server injects only `{ authMode }` into the built HTML. Database paths, `AUTH_SECRET`, provider credentials, and deployment-specific values are never browser configuration.
+
+Enabled authentication always requires an `AUTH_SECRET` of at least 32 characters. It keys purpose-separated HMAC-SHA-256 hashes for session tokens, login state, and CSRF material. Changing it deliberately invalidates all outstanding login transactions and sessions; rotation is fail-closed and requires users to sign in again. Use a persistent SQLite path in production. Migrations are ordered and transactional, reject unsupported newer versions, and verify the target schema.
+
+The provider-neutral API exposes discovery, session, login/callback, and CSRF-protected logout under `/api/auth`. No concrete identity provider is bundled. Adapters implement `createAuthorizationUrl` and `exchangeCallback`; optional serialized transaction context is available for a future adapter, but this change does not implement OIDC, discovery, JWKS, PKCE, nonce, or token validation. Login state is stored only as a keyed hash, bound to provider and server-owned return path, expires, and is atomically consumed once with identity/session mutation. Authentication data consists of user profiles, identities uniquely keyed by `(issuer, subject)`, and keyed-hash opaque sessions.
 
 ---
 

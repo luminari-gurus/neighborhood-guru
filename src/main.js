@@ -8,14 +8,18 @@ import { UIController } from './js/ui.js';
 import { WeatherService } from './js/weather-service.js';
 import { OverpassService } from './js/overpass-service.js';
 import { JamBaseService } from './js/jambase-service.js';
-import { createAnonymousAuthClient, createAuthState } from './js/auth/index.js';
+import { createAnonymousAuthClient, createAuthState, createHttpAuthClient } from './js/auth/index.js';
+
+export function createRuntimeAuthClient(config = globalThis.__NG_RUNTIME_CONFIG__ || { authMode: 'disabled' }) {
+  return config.authMode === 'optional' || config.authMode === 'required' ? createHttpAuthClient() : createAnonymousAuthClient();
+}
 
 class NeighborhoodGuruApp {
   constructor() {
     this.storage = StorageService;
     this.mapboxService = new MapboxService();
     this.ui = new UIController();
-    this.auth = createAuthState(createAnonymousAuthClient());
+    this.auth = createAuthState(createRuntimeAuthClient());
     this.unsubscribeAuth = this.auth.subscribe((state) => {
       this.authState = state;
     });
