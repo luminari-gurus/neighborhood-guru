@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { createAuthBackend } from '../../server/auth/backend.js';
 import { loadAuthConfig } from '../../server/auth/config.js';
-import { AUTH_MODES, LOGIN_STATE_COOKIE_NAME, SESSION_COOKIE_NAME, SESSION_DURATION_MS } from '../../server/auth/constants.js';
+import { AUTH_MODES, LOGIN_STATE_COOKIE_NAME, SESSION_COOKIE_NAME, SESSION_DURATION_MS, MAX_CALLBACK_BODY_BYTES } from '../../server/auth/constants.js';
 
 const NOW = 1_800_000_000_000;
 const databases = [];
@@ -13,6 +13,18 @@ const deterministicRandom = (length) => {
 };
 const request = (path, init) => new Request(`https://app.example${path}`, init);
 const valueFromCookie = (header, name) => header.match(new RegExp(`${name}=([^;,]+)`))?.[1];
+const encoder = new TextEncoder();
+const createBodyStream = (value, chunkSize = 1024) => {
+  const bytes = encoder.encode(value);
+  return new ReadableStream({
+    start(controller) {
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        controller.enqueue(bytes.subarray(offset, offset + chunkSize));
+      }
+      controller.close();
+    },
+  });
+};
 function config(mode = AUTH_MODES.OPTIONAL) { return { mode, databasePath: ':memory:', secret: 'x'.repeat(32), production: false }; }
 function fakeProvider(overrides = {}) {
   return { id: 'generic', displayName: 'Generic Login',
@@ -86,6 +98,44 @@ describe('sessions, callback, and logout', () => {
     const api = backend(); const { cookie } = await sessionCookie(api); const login = await api.fetch(request('/api/auth/login/generic')); const state = valueFromCookie(login.headers.get('set-cookie'), LOGIN_STATE_COOKIE_NAME);
     await api.fetch(request(`/api/auth/callback/generic?state=${state}`, { headers: { cookie: `${cookie}; ${LOGIN_STATE_COOKIE_NAME}=${state}` } }));
     expect(api.database.query('SELECT count(*) count FROM sessions WHERE revoked_at IS NOT NULL').get().count).toBe(1);
+  });
+  test('POST callback enforces byte limits, exact boundary handling, and content-type validation', async () => {
+    const calls = { exchange: 0 };
+    const api = backend({ providers: [fakeProvider({
+      exchangeCallback: async () => {
+        calls.exchange += 1;
+        return { identity: { issuer: 'https://identity.example', subject: 'subject-1' }, user: { displayName: 'Ada', email: 'ada@example.test', avatarUrl: null }, returnPath: '/map' };
+      },
+    })] });
+    const login = await api.fetch(request('/api/auth/login/generic'));
+    const state = valueFromCookie(login.headers.get('set-cookie'), LOGIN_STATE_COOKIE_NAME);
+    const cookie = `${LOGIN_STATE_COOKIE_NAME}=${state}`;
+    const exactPadding = MAX_CALLBACK_BODY_BYTES - `state=${state}&pad=`.length;
+    const exactBody = `state=${state}&pad=${'a'.repeat(Math.max(0, exactPadding))}`;
+    expect(exactBody.length).toBe(MAX_CALLBACK_BODY_BYTES);
+    expect((await api.fetch(request('/api/auth/callback/generic', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: exactBody }))).status).toBe(302);
+    expect(calls.exchange).toBe(1);
+
+    calls.exchange = 0;
+    const oversizedBody = `state=${state}&pad=${'a'.repeat(MAX_CALLBACK_BODY_BYTES + 128)}`;
+    expect((await api.fetch(request('/api/auth/callback/generic', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', 'content-length': '10' },
+      body: createBodyStream(oversizedBody),
+    }))).status).toBe(413);
+    expect(calls.exchange).toBe(0);
+
+    calls.exchange = 0;
+    expect((await api.fetch(request('/api/auth/callback/generic', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: createBodyStream(oversizedBody, 2048),
+    }))).status).toBe(413);
+    expect(calls.exchange).toBe(0);
+
+    calls.exchange = 0;
+    expect((await api.fetch(request('/api/auth/callback/generic', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ state }) }))).status).toBe(400);
+    expect(calls.exchange).toBe(0);
   });
   test('callback rejects missing state, provider failure, invalid response, unknown provider, and open redirect', async () => {
     expect((await backend().fetch(request('/api/auth/callback/missing?state=x'))).status).toBe(404);

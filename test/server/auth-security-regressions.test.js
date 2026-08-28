@@ -14,6 +14,15 @@ const callbackHeaders = (state, session) => ({ cookie: `${LOGIN_STATE_COOKIE_NAM
 const provider = (id = 'generic', overrides = {}) => ({ id, displayName: id, createAuthorizationUrl: async ({ state }) => `https://id.example/auth?state=${state}`, exchangeCallback: async () => ({ identity: { issuer: 'https://id.example', subject: 'subject' }, user: { displayName: 'Ada', email: null, avatarUrl: null }, returnPath: '/evil' }), ...overrides });
 function backend(options = {}) { const database = options.database || new Database(':memory:'); databases.push(database); return createAuthBackend({ config: config(), database, clock: () => NOW, randomBytes, providers: [provider()], ...options }); }
 async function login(api, id = 'generic', path = '/owned') { const response = await api.fetch(req(`/api/auth/login/${id}?returnPath=${encodeURIComponent(path)}`)); return cookieValue(response, LOGIN_STATE_COOKIE_NAME); }
+function makeStream(value, chunkSize = 1024) {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(value);
+  return new ReadableStream({ start(controller) {
+    for (let index = 0; index < bytes.length; index += chunkSize) controller.enqueue(bytes.slice(index, index + chunkSize));
+    controller.close();
+  } });
+}
+function makeBytes(value) { return new TextEncoder().encode(value).length; }
 afterEach(() => { seed = 0; while (databases.length) try { databases.pop().close(); } catch {} });
 
 describe('login transaction security regressions', () => {
@@ -64,12 +73,66 @@ describe('login transaction security regressions', () => {
       expect(api.database.query('SELECT count(*) count FROM users').get().count).toBe(0);
     }
   });
-  test('competing callbacks deterministically create one identity and replay loses', async () => {
-    const api = backend(); const first = await login(api, 'generic', '/one'); const second = await login(api, 'generic', '/two');
-    const results = await Promise.all([api.fetch(req(`/api/auth/callback/generic?state=${first}`, { headers: callbackHeaders(first) })), api.fetch(req(`/api/auth/callback/generic?state=${second}`, { headers: callbackHeaders(second) }))]);
-    expect(results.map(({ status }) => status)).toEqual([302, 302]); expect(api.database.query('SELECT count(*) count FROM external_identities').get().count).toBe(1);
-    const replayResults = await Promise.all([api.fetch(req(`/api/auth/callback/generic?state=${first}`, { headers: callbackHeaders(first) })), api.fetch(req(`/api/auth/callback/generic?state=${first}`, { headers: callbackHeaders(first) }))]);
-    expect(replayResults.every(({ status }) => status === 400)).toBe(true);
+  test('adapter context must be strict and preserve exact accepted values', async () => {
+    const captured = [];
+    const api = backend({ providers: [provider('generic', {
+      createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: { nested: { enabled: true, value: null }, tags: [1, true, null, 'ok'], numbers: [1, 2.5] } }),
+      exchangeCallback: async ({ context }) => { captured.push(context); return { identity: { issuer: 'https://id.example', subject: 'subject' }, user: { displayName: 'Ada', email: null, avatarUrl: null }, returnPath: '/owned' }; },
+    })] });
+    const state = await login(api);
+    expect((await api.fetch(req(`/api/auth/callback/generic?state=${state}`, { headers: callbackHeaders(state) }))).status).toBe(302);
+    expect(captured).toEqual([{ nested: { enabled: true, value: null }, tags: [1, true, null, 'ok'], numbers: [1, 2.5] }]);
+  });
+  test('rejects Map and multibyte boundary context limits', async () => {
+    const mapContext = backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: new Map([['legacy', 'value']]) }) })] });
+    expect((await mapContext.fetch(req('/api/auth/login/generic'))).status).toBe(502);
+
+    const exact = 'é'.repeat(32767);
+    const tooBig = 'é'.repeat(32768);
+    expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: exact }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(302);
+    expect((await backend({ providers: [provider('generic', { createAuthorizationUrl: async ({ state }) => ({ location: `https://id.example/auth?state=${state}`, context: tooBig }) })] }).fetch(req('/api/auth/login/generic'))).status).toBe(502);
+  });
+  test('callback with shared old session is atomic and fails closed on concurrent race', async () => {
+    const raceProvider = provider('generic', {
+      exchangeCallback: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await secondStarted;
+        } else {
+          releaseSecond();
+        }
+        return { identity: { issuer: 'https://id.example', subject: 'subject' }, user: { displayName: 'Ada', email: null, avatarUrl: null }, returnPath: '/owned' };
+      },
+    });
+    const api = backend({ providers: [raceProvider] });
+    let calls = 0;
+    let releaseSecond;
+    const secondStarted = new Promise((resolve) => { releaseSecond = resolve; });
+    const responses = await (async () => {
+      api.database.run("INSERT INTO users VALUES (?,NULL,NULL,NULL,?,?)", ["old-user", NOW, NOW]);
+      const old = api.issueSession("old-user");
+      const first = await login(api, 'generic', '/one');
+      const second = await login(api, 'generic', '/two');
+      return Promise.all([
+        api.fetch(req(`/api/auth/callback/generic?state=${first}`, { headers: callbackHeaders(first, old.raw) })),
+        api.fetch(req(`/api/auth/callback/generic?state=${second}`, { headers: callbackHeaders(second, old.raw) })),
+      ]);
+    })();
+    expect(responses.map(({ status }) => status).sort()).toEqual([302, 400]);
+    expect(api.database.query('SELECT count(*) count FROM sessions WHERE revoked_at IS NULL').get().count).toBe(1);
+    expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(2);
+    expect(api.database.query('SELECT count(*) count FROM external_identities').get().count).toBe(1);
+  });
+  test('callback with no old cookie can create parallel independent replacements', async () => {
+    const api = backend();
+    const first = await login(api, 'generic', '/one');
+    const second = await login(api, 'generic', '/two');
+    const responses = await Promise.all([
+      api.fetch(req(`/api/auth/callback/generic?state=${first}`, { headers: callbackHeaders(first) })),
+      api.fetch(req(`/api/auth/callback/generic?state=${second}`, { headers: callbackHeaders(second) })),
+    ]);
+    expect(responses.map(({ status }) => status).sort()).toEqual([302, 302]);
+    expect(api.database.query('SELECT count(*) count FROM sessions WHERE revoked_at IS NULL').get().count).toBe(2);
   });
   test('provider discovery exceptions become redacted API failures', async () => {
     const api = backend({ providerRegistry: { list() { throw new Error('registry-secret'); }, get() { return null; } } }); const response = await api.fetch(req('/api/auth/providers'));

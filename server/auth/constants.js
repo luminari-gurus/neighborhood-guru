@@ -14,5 +14,7 @@ export const MAX_PROVIDER_ID_LENGTH = 64;
 export const MAX_ISSUER_LENGTH = 2048;
 export const MAX_SUBJECT_LENGTH = 512;
 export const MAX_PROFILE_FIELD_LENGTH = 2048;
+export const MAX_CALLBACK_BODY_BYTES = 65536;
+export const MAX_ADAPTER_CONTEXT_BYTES = 65536;
 export const DATABASE_SCHEMA_VERSION = 2;
 export const COOKIE_ATTRIBUTES = Object.freeze({ httpOnly: true, secure: true, sameSite: 'Lax', path: '/' });

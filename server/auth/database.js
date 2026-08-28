@@ -2,14 +2,14 @@ import { DATABASE_SCHEMA_VERSION } from './constants.js';
 
 const MIGRATIONS = new Map([
   [0, `
-    CREATE TABLE users (id TEXT PRIMARY KEY, display_name TEXT, email TEXT, avatar_url TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-    CREATE TABLE external_identities (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, issuer TEXT NOT NULL, subject TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (issuer, subject));
-    CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, created_at INTEGER NOT NULL);
+    CREATE TABLE users (id TEXT PRIMARY KEY NOT NULL, display_name TEXT, email TEXT, avatar_url TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE external_identities (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, issuer TEXT NOT NULL, subject TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (issuer, subject));
+    CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, created_at INTEGER NOT NULL);
     CREATE INDEX sessions_user_id_idx ON sessions(user_id);
   `],
   [1, `
     CREATE TABLE login_transactions (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       state_hash TEXT NOT NULL UNIQUE,
       provider_id TEXT NOT NULL,
       return_path TEXT NOT NULL,
@@ -29,7 +29,10 @@ const REQUIRED = Object.freeze({
   login_transactions: { id: ["TEXT", 1, 1], state_hash: ["TEXT", 1, 0], provider_id: ["TEXT", 1, 0], return_path: ["TEXT", 1, 0], adapter_context: ["TEXT", 0, 0], created_at: ["INTEGER", 1, 0], expires_at: ["INTEGER", 1, 0], consumed_at: ["INTEGER", 0, 0] },
 });
 const UNIQUE = Object.freeze({ external_identities: [["issuer", "subject"]], sessions: [["token_hash"]], login_transactions: [["state_hash"]] });
-const INDEXES = Object.freeze({ sessions_user_id_idx: ["sessions", ["user_id"]], login_transactions_expires_at_idx: ["login_transactions", ["expires_at"]] });
+const INDEXES = Object.freeze({
+  sessions_user_id_idx: { table: 'sessions', name: 'sessions_user_id_idx', columns: ['user_id'], unique: 0, partial: 0, origin: 'c' },
+  login_transactions_expires_at_idx: { table: 'login_transactions', name: 'login_transactions_expires_at_idx', columns: ['expires_at'], unique: 0, partial: 0, origin: 'c' },
+});
 function pragma(database, sql) { return database.query(sql).all(); }
 function columnsOf(database, index) { return pragma(database, `PRAGMA index_info(${JSON.stringify(index)})`).sort((x, y) => x.seqno - y.seqno).map((row) => row.name); }
 function sameColumns(left, right) { return left.length === right.length && left.every((value, index) => value === right[index]); }
@@ -40,7 +43,7 @@ function verifySchema(database) {
     if (rows.length !== Object.keys(expected).length) malformed(table);
     for (const row of rows) {
       const specification = expected[row.name];
-      if (!specification || row.type.toUpperCase() !== specification[0] || (row.name !== "id" && row.notnull !== specification[1]) || row.pk !== specification[2]) malformed(`${table}.${row.name}`);
+      if (!specification || row.type.toUpperCase() !== specification[0] || row.notnull !== specification[1] || row.pk !== specification[2]) malformed(`${table}.${row.name}`);
     }
   }
   for (const table of ["external_identities", "sessions"]) {
@@ -49,11 +52,18 @@ function verifySchema(database) {
   }
   for (const [table, groups] of Object.entries(UNIQUE)) {
     const indexes = pragma(database, `PRAGMA index_list(${JSON.stringify(table)})`);
-    for (const group of groups) if (!indexes.some((index) => index.unique === 1 && sameColumns(columnsOf(database, index.name), group))) malformed(`${table} unique`);
+    for (const columns of groups) {
+      const unique = indexes.find((index) => index.unique === 1 && index.partial === 0 && (index.origin === 'u' || index.origin === 'c') && sameColumns(columnsOf(database, index.name), columns));
+      if (!unique) malformed(`${table} unique`);
+    }
   }
-  for (const [name, [table, columns]] of Object.entries(INDEXES)) {
-    const index = pragma(database, `PRAGMA index_list(${JSON.stringify(table)})`).find((entry) => entry.name === name);
-    if (!index || !sameColumns(columnsOf(database, name), columns)) malformed(name);
+  for (const expected of Object.values(INDEXES)) {
+    const indexes = pragma(database, `PRAGMA index_list(${JSON.stringify(expected.table)})`);
+    const index = indexes.find((entry) => entry.name === expected.name);
+    if (!index) malformed(expected.name);
+    if (index.unique !== expected.unique || index.partial !== expected.partial || index.origin !== expected.origin || !sameColumns(columnsOf(database, expected.name), expected.columns)) {
+      malformed(expected.name);
+    }
   }
 }
 

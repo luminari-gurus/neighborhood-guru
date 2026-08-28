@@ -95,13 +95,20 @@
 
 ### Optional authentication backend
 
-The static, local-first build remains the default: its injected runtime mode is `disabled`, it constructs the anonymous AuthClient, and it makes zero authentication requests. `bun run server` serves `dist/` and `/api/auth` on one origin. Set `AUTH_MODE=optional` to serve the app anonymously with auth available, or `AUTH_MODE=required` to return `401 authentication_required` for SPA/static requests without a valid session. Required mode does not invent a login provider; deployments must register at least one adapter before users can authenticate.
+The static, local-first build remains the default: its injected runtime mode is `disabled`, it constructs the anonymous AuthClient, and it makes zero authentication requests. `bun run server` serves `dist/` and `/api/auth` on one origin.
+
+Set `AUTH_MODE=optional` to serve the app anonymously with auth available.
+Set `AUTH_MODE=required` to serve a generic login bootstrap on `/` and block all protected SPA/static/API content (`401 authentication_required`) until a session is established. Required mode still allows `/api/auth/providers` discovery for bootstrap rendering.
+`createServer({ mode: 'required', providerRegistry })` refuses to start with no adapters so there is always a valid login path at runtime.
 
 For local same-origin development, run the Bun server on port 3000 and Vite separately; Vite proxies `/api/auth` to `AUTH_DEV_SERVER` (default `http://localhost:3000`). The production server injects only `{ authMode }` into the built HTML. Database paths, `AUTH_SECRET`, provider credentials, and deployment-specific values are never browser configuration.
 
 Enabled authentication always requires an `AUTH_SECRET` of at least 32 characters. It keys purpose-separated HMAC-SHA-256 hashes for session tokens, login state, and CSRF material. Changing it deliberately invalidates all outstanding login transactions and sessions; rotation is fail-closed and requires users to sign in again. Use a persistent SQLite path in production. Migrations are ordered and transactional, reject unsupported newer versions, and verify the target schema.
 
-The provider-neutral API exposes discovery, session, login/callback, and CSRF-protected logout under `/api/auth`. No concrete identity provider is bundled. Adapters implement `createAuthorizationUrl` and `exchangeCallback`; optional serialized transaction context is available for a future adapter, but this change does not implement OIDC, discovery, JWKS, PKCE, nonce, or token validation. Login state is stored only as a keyed hash, bound to provider and server-owned return path, expires, and is atomically consumed once with identity/session mutation. Authentication data consists of user profiles, identities uniquely keyed by `(issuer, subject)`, and keyed-hash opaque sessions.
+The provider-neutral API exposes discovery, session, login/callback, and CSRF-protected logout under `/api/auth`. No concrete identity provider is bundled. Adapters implement `createAuthorizationUrl` and `exchangeCallback`; provider context is optional, typed JSON-safe, and bounded.
+In `required` mode, the provider list and callback bootstrap live in separate runtime composition layers (`createServer({ providerRegistry })` plus `createAuthBackend`) and are used by the generic required-mode UI.
+Login state is stored as a server-owned keyed hash, bound to provider and return path, expires, and is claimed/consumed before provider callback exchange. On adapter failure, exchange failure, or final DB conflict, consumed state remains consumed; users restart from a new login flow.
+Authentication data consists of user profiles, identities uniquely keyed by `(issuer, subject)`, and opaque HMAC-bound sessions.
 
 ---
 
