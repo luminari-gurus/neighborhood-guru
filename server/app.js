@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { AUTH_MODES } from './auth/constants.js';
-const RUNTIME_MARKER='globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};';
+export const RUNTIME_MARKER='globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};';
 const TYPES=Object.freeze({'.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.html':'text/html; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp','.woff2':'font/woff2','.txt':'text/plain; charset=utf-8'});
 const extension=path=>{const dot=path.lastIndexOf('.');return dot<0?'':path.slice(dot).toLowerCase();};
 const contained=(root,target)=>target===root||target.startsWith(`${root}${sep}`);

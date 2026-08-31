@@ -101,7 +101,32 @@ Set `AUTH_MODE=optional` to serve the app anonymously with auth available.
 Set `AUTH_MODE=required` to serve a generic login bootstrap on `/` and block all protected SPA/static/API content (`401 authentication_required`) until a session is established. Required mode still allows `/api/auth/providers` discovery for bootstrap rendering.
 `createServer({ mode: 'required', providerRegistry })` refuses to start with no adapters so there is always a valid login path at runtime.
 
-For local same-origin development, run the Bun server on port 3000 and Vite separately; Vite proxies `/api/auth` to `AUTH_DEV_SERVER` (default `http://localhost:3000`). The production server injects only `{ authMode }` into the built HTML. Database paths, `AUTH_SECRET`, provider credentials, and deployment-specific values are never browser configuration.
+**Local development with auth enabled** uses Vite on port 5173 and the Bun server on port 3000:
+
+```bash
+cp .env.example .env
+```
+
+Set these **server-only** values in `.env` (do not prefix them with `VITE_`; they must never reach the browser):
+
+```env
+AUTH_MODE=optional
+AUTH_DATABASE_PATH=./neighborhood-guru.sqlite
+AUTH_SECRET=replace-with-at-least-32-random-characters
+```
+
+`AUTH_DATABASE_PATH` is required whenever `AUTH_MODE` is `optional` or `required`, in every environment, so sessions persist across restarts. `:memory:` is used only when you set `AUTH_DATABASE_PATH=:memory:` explicitly (for tests).
+
+Then run the API server and Vite together (separate terminals):
+
+```bash
+bun run server
+bun run dev
+```
+
+Vite proxies `/api/auth` to `AUTH_DEV_SERVER` (default `http://localhost:3000`) and, when `AUTH_MODE` is `optional` or `required`, replaces the static runtime marker (`globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};`) with JSON `{ authMode }` so the HTTP AuthClient is enabled. Without those modes, `bun run dev` keeps the static disabled default.
+
+The production server injects only `{ authMode }` into the built HTML. Database paths, `AUTH_SECRET`, provider credentials, and deployment-specific values are never browser configuration.
 
 Enabled authentication always requires an `AUTH_SECRET` of at least 32 characters. It keys purpose-separated HMAC-SHA-256 hashes for session tokens, login state, and CSRF material. Changing it deliberately invalidates all outstanding login transactions and sessions; stale session cookies are actively cleared when users start a new login under the rotated secret so recovery is usually a single click, while callbacks remain fail-closed when stale cookies are still attached.
 
