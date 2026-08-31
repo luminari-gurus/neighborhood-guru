@@ -2,6 +2,35 @@ import { StorageService } from './storage.js';
 
 export class JamBaseService {
   static CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Hours TTL
+  static _apiFallbackNotified = false;
+  static _onApiFallback = null;
+
+  /**
+   * Set callback for when API fails and falls back to scraper.
+   * Used to show user-visible notification about slower loads.
+   */
+  static setApiFallbackCallback(callback) {
+    this._onApiFallback = typeof callback === 'function' ? callback : null;
+  }
+
+  /**
+   * Reset the API fallback notification state.
+   * Call this to allow showing the notification again (e.g., after page load or settings change).
+   */
+  static resetApiFallbackNotification() {
+    this._apiFallbackNotified = false;
+  }
+
+  /**
+   * Internal: notify about API failure (only once per session to avoid spam)
+   */
+  static _notifyApiFallback(reason) {
+    if (this._apiFallbackNotified) return;
+    this._apiFallbackNotified = true;
+    if (this._onApiFallback) {
+      this._onApiFallback(reason);
+    }
+  }
 
   /**
    * Extract JamBase venue ID or slug from a raw ID or full JamBase URL
@@ -211,7 +240,11 @@ export class JamBaseService {
 
     // 1. Query JamBase Data API v3 if API token is provided
     const apiKey = StorageService.getJambaseToken();
+    let apiAttempted = false;
+    let apiFailureReason = null;
+
     if (apiKey) {
+      apiAttempted = true;
       const cleanVenueName = cleanId.replace(/-/g, ' ');
       const v3Endpoints = [
         `https://corsproxy.io/?${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`)}`,
@@ -228,6 +261,16 @@ export class JamBaseService {
               'Accept': 'application/json',
             }
           });
+
+          if (res.status === 401 || res.status === 403) {
+            apiFailureReason = 'auth';
+            continue;
+          }
+
+          if (res.status === 429) {
+            apiFailureReason = 'rate_limit';
+            continue;
+          }
 
           if (res.ok) {
             const text = await res.text();
@@ -264,14 +307,23 @@ export class JamBaseService {
               this.setCachedShows(cleanId, finalShows);
               return finalShows;
             }
+          } else if (!apiFailureReason) {
+            apiFailureReason = 'error';
           }
         } catch (err) {
           console.warn('JamBase v3 API endpoint attempt error:', err);
+          if (!apiFailureReason) {
+            apiFailureReason = 'network';
+          }
         }
+      }
+
+      if (apiFailureReason) {
+        this._notifyApiFallback(apiFailureReason);
       }
     }
 
-    // 2. Fallback to dual CORS proxy HTML scraper if no key is configured
+    // 2. Fallback to dual CORS proxy HTML scraper if no key is configured or API failed
     const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
     const proxyUrls = [
       `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,

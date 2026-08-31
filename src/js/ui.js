@@ -870,6 +870,7 @@ export class UIController {
     let icon = 'ℹ️';
     if (type === 'success') icon = '✅';
     if (type === 'error') icon = '⚠️';
+    if (type === 'warning') icon = '⚡';
 
     toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
     this.elements.toastContainer.appendChild(toast);
@@ -879,6 +880,24 @@ export class UIController {
       toast.style.transition = 'opacity 0.3s ease';
       setTimeout(() => toast.remove(), 300);
     }, 3500);
+  }
+
+  /**
+   * Show toast notification when JamBase API falls back to slower scraping.
+   * Provides user-visible feedback about why venue shows may load slowly.
+   */
+  showJambaseApiFallbackToast(reason) {
+    let message = 'JamBase API unavailable — loading venue shows via fallback (may be slower).';
+    
+    if (reason === 'auth') {
+      message = 'JamBase API key expired or invalid — loading shows via slower fallback.';
+    } else if (reason === 'rate_limit') {
+      message = 'JamBase API rate limit reached — loading shows via slower fallback.';
+    } else if (reason === 'network') {
+      message = 'JamBase API unreachable — loading shows via slower fallback.';
+    }
+
+    this.showToast(message, 'warning');
   }
 
   escapeHtml(str) {
