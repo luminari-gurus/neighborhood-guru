@@ -6,5 +6,6 @@ export {
   normalizeSession,
 } from './auth-client.js';
 export { createAnonymousAuthClient } from './anonymous-auth-client.js';
+export { createHttpAuthClient } from './http-auth-client.js';
 export { createAuthState } from './auth-state.js';
 export { FakeAuthClient } from './fake-auth-client.js';
