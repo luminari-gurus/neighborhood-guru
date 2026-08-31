@@ -34,6 +34,11 @@ class NeighborhoodGuruApp {
     // 1. Initialize UI Controller & cache elements
     this.ui.init();
 
+    // Wire up JamBase API fallback notification (shows toast when API fails)
+    JamBaseService.setApiFallbackCallback((reason) => {
+      this.ui.showJambaseApiFallbackToast(reason);
+    });
+
     // 2. Load stored data
     this.homeAddress = this.storage.getHomeAddress();
     this.savedPlaces = this.storage.getSavedPlaces();
