@@ -42,12 +42,15 @@ afterEach(() => { randomCall = 0; while (databases.length) { try { databases.pop
 describe('authentication configuration', () => {
   test('defaults to disabled and validates all startup modes', () => {
     expect(loadAuthConfig({}).mode).toBe(AUTH_MODES.DISABLED);
-    expect(loadAuthConfig({ AUTH_MODE: 'optional' }).mode).toBe(AUTH_MODES.OPTIONAL);
-    expect(loadAuthConfig({ AUTH_MODE: 'required' }).mode).toBe(AUTH_MODES.REQUIRED);
+    expect(loadAuthConfig({ AUTH_MODE: 'optional', AUTH_DATABASE_PATH: ':memory:' }).mode).toBe(AUTH_MODES.OPTIONAL);
+    expect(loadAuthConfig({ AUTH_MODE: 'required', AUTH_DATABASE_PATH: ':memory:' }).mode).toBe(AUTH_MODES.REQUIRED);
     expect(() => loadAuthConfig({ AUTH_MODE: 'bad' })).toThrow('AUTH_MODE');
   });
-  test('fails production startup clearly when enabled configuration is absent', () => {
-    expect(() => loadAuthConfig({ NODE_ENV: 'production', AUTH_MODE: 'required', AUTH_SECRET: 'secret' })).toThrow('AUTH_DATABASE_PATH');
+  test('fails closed when authentication is enabled without AUTH_DATABASE_PATH', () => {
+    expect(() => loadAuthConfig({ AUTH_MODE: 'optional' })).toThrow('AUTH_DATABASE_PATH');
+    expect(() => loadAuthConfig({ AUTH_MODE: 'required' })).toThrow('AUTH_DATABASE_PATH');
+    expect(() => loadAuthConfig({ NODE_ENV: 'production', AUTH_MODE: 'required', AUTH_SECRET: 's'.repeat(32) })).toThrow('AUTH_DATABASE_PATH');
+    expect(loadAuthConfig({ AUTH_MODE: 'optional', AUTH_DATABASE_PATH: ':memory:' }).databasePath).toBe(':memory:');
     expect(loadAuthConfig({ NODE_ENV: 'production', AUTH_MODE: 'disabled' }).mode).toBe('disabled');
   });
   test('disabled backend remains unavailable without opening SQLite', async () => {
