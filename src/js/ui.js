@@ -863,7 +863,13 @@ export class UIController {
   /**
    * Toast Notifications System
    */
-  showToast(message, type = 'info') {
+  showToast(message, type = 'info', durationMs = 3500) {
+    const container = this.elements.toastContainer || document.getElementById('toast-container');
+    if (!container) {
+      console.warn('Toast container missing:', message);
+      return;
+    }
+
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     
@@ -873,13 +879,13 @@ export class UIController {
     if (type === 'warning') icon = '⚡';
 
     toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
-    this.elements.toastContainer.appendChild(toast);
+    container.appendChild(toast);
 
     setTimeout(() => {
       toast.style.opacity = '0';
       toast.style.transition = 'opacity 0.3s ease';
       setTimeout(() => toast.remove(), 300);
-    }, 3500);
+    }, durationMs);
   }
 
   /**
@@ -895,9 +901,11 @@ export class UIController {
       message = 'JamBase API rate limit reached — loading shows via slower fallback.';
     } else if (reason === 'network') {
       message = 'JamBase API unreachable — loading shows via slower fallback.';
+    } else if (reason === 'no_results') {
+      message = 'JamBase API returned no events for this venue — loading shows via fallback.';
     }
 
-    this.showToast(message, 'warning');
+    this.showToast(message, 'warning', 8000);
   }
 
   escapeHtml(str) {

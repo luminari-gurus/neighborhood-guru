@@ -1191,10 +1191,10 @@ body, html {
 
 /* Toast Notifications */
 #toast-container {
-  position: absolute;
+  position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 200;
+  z-index: 4000;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1220,6 +1220,7 @@ body, html {
 .toast-success { border-left: 4px solid var(--accent); }
 .toast-info { border-left: 4px solid var(--primary); }
 .toast-error { border-left: 4px solid var(--danger); }
+.toast-warning { border-left: 4px solid #f59e0b; }
 
 /* Keyframe Animations */
 @keyframes slideUpFade {

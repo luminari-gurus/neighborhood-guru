@@ -2,6 +2,8 @@ import { StorageService } from './storage.js';
 
 export class JamBaseService {
   static CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Hours TTL
+  // Same-origin proxy (Vite dev + production server) so Bearer auth is not stripped by CORS proxies.
+  static API_PROXY_BASE = '/api-jambase/v3';
   static _apiFallbackNotified = false;
   static _onApiFallback = null;
 
@@ -27,8 +29,42 @@ export class JamBaseService {
   static _notifyApiFallback(reason) {
     if (this._apiFallbackNotified) return;
     this._apiFallbackNotified = true;
-    if (this._onApiFallback) {
-      this._onApiFallback(reason);
+    try {
+      if (this._onApiFallback) {
+        this._onApiFallback(reason);
+      }
+    } catch (err) {
+      console.warn('JamBase API fallback notification error:', err);
+    }
+  }
+
+  /**
+   * Convert a stored venue slug/URL/id into a JamBase Data API venueId (jambase:12345).
+   * Numeric IDs and slugs that end in digits (e.g. the-fillmore-15421) are supported.
+   */
+  static toJamBaseVenueId(inputStr) {
+    const cleanId = this.extractVenueId(inputStr);
+    if (!cleanId) return null;
+    if (/^\d+$/.test(cleanId)) return `jambase:${cleanId}`;
+    // Trailing 4+ digits from URLs like jambase.com/venue/the-fillmore-15421
+    const trailing = cleanId.match(/-(\d{4,})$/);
+    if (trailing) return `jambase:${trailing[1]}`;
+    return null;
+  }
+
+  /**
+   * Drop cached venue show lists (used when the API key changes).
+   */
+  static clearShowsCache() {
+    try {
+      const keysToRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('guru_jb_shows_')) keysToRemove.push(key);
+      }
+      keysToRemove.forEach((key) => localStorage.removeItem(key));
+    } catch (e) {
+      console.warn('Cache clear error:', e);
     }
   }
 
@@ -224,7 +260,86 @@ export class JamBaseService {
   }
 
   /**
-   * Fetch REAL upcoming concert schedule from JamBase with 4-Hour TTL caching & forceRefresh
+   * Same-origin GET against the JamBase Data API v3 proxy.
+   * Returns { data } on success or { failureReason, status }.
+   */
+  static async _fetchJamBaseApi(pathWithQuery, apiKey) {
+    const path = pathWithQuery.startsWith('/') ? pathWithQuery : `/${pathWithQuery}`;
+    const url = `${this.API_PROXY_BASE}${path}`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+        },
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        return { failureReason: 'auth', status: res.status };
+      }
+      if (res.status === 429) {
+        return { failureReason: 'rate_limit', status: res.status };
+      }
+      if (!res.ok) {
+        return { failureReason: 'error', status: res.status };
+      }
+
+      const text = await res.text();
+      const trimmed = text.trim();
+      if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+        return { failureReason: 'error', status: res.status };
+      }
+
+      const data = JSON.parse(trimmed);
+      if (data && data.success === false) {
+        return { failureReason: 'error', status: res.status, data };
+      }
+      return { data, status: res.status };
+    } catch (err) {
+      console.warn('JamBase v3 API request error:', err);
+      return { failureReason: 'network' };
+    }
+  }
+
+  static _eventListFromPayload(data) {
+    if (!data) return null;
+    if (Array.isArray(data)) return data;
+    const raw = data.events || data.records || data.data || null;
+    return Array.isArray(raw) ? raw : null;
+  }
+
+  static _venueListFromPayload(data) {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    const raw = data.venues || data.records || data.data || [];
+    return Array.isArray(raw) ? raw : [];
+  }
+
+  static _mapApiEvents(rawEvents, cleanId) {
+    const todayStr = new Date().toDateString();
+    return rawEvents.map((ev) => {
+      const startDateStr = ev.startDate || ev.eventDate || ev.dateTime || ev.date;
+      const startDate = startDateStr ? new Date(startDateStr) : null;
+      const isToday = startDate ? startDate.toDateString() === todayStr : false;
+
+      let title = ev.name || ev.title || '';
+      if (!title && ev.performer) {
+        title = Array.isArray(ev.performer) ? ev.performer.map((p) => p.name || p).join(', ') : (ev.performer.name || ev.performer);
+      }
+      if (!title) title = 'Concert';
+
+      return {
+        title,
+        date: startDate ? startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' }) : '',
+        time: startDate ? startDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+        isToday,
+        url: ev.url || ev.ticketUrl || `https://www.jambase.com/venue/${cleanId}`,
+      };
+    });
+  }
+
+  /**
+   * Fetch upcoming concert schedule from JamBase Data API v3, with HTML scraper fallback.
    */
   static async fetchUpcomingShows(jambaseId, forceRefresh = false) {
     if (!jambaseId) return [];
@@ -238,92 +353,65 @@ export class JamBaseService {
       }
     }
 
-    // 1. Query JamBase Data API v3 if API token is provided
     const apiKey = StorageService.getJambaseToken();
-    let apiAttempted = false;
     let apiFailureReason = null;
 
     if (apiKey) {
-      apiAttempted = true;
-      const cleanVenueName = cleanId.replace(/-/g, ' ');
-      const v3Endpoints = [
-        `https://corsproxy.io/?${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`)}`,
-        `https://corsproxy.io/?${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueId=jambase:${encodeURIComponent(cleanId)}`)}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`)}`,
-        `https://api.data.jambase.com/v3/events?venueName=${encodeURIComponent(cleanVenueName)}`,
-      ];
+      const venueName = cleanId.replace(/-/g, ' ');
+      const venueId = this.toJamBaseVenueId(cleanId);
 
-      for (const apiUrl of v3Endpoints) {
-        try {
-          const res = await fetch(apiUrl, {
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
-              'Accept': 'application/json',
-            }
-          });
+      const tryEventsQuery = async (query) => {
+        const result = await this._fetchJamBaseApi(`/events?${query}&perPage=5`, apiKey);
+        if (result.failureReason) {
+          apiFailureReason = result.failureReason;
+          return null;
+        }
+        const rawEvents = this._eventListFromPayload(result.data);
+        if (rawEvents && rawEvents.length > 0) {
+          const finalShows = this._mapApiEvents(rawEvents, cleanId).slice(0, 5);
+          console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
+          this.setCachedShows(cleanId, finalShows);
+          return finalShows;
+        }
+        if (!apiFailureReason) apiFailureReason = 'no_results';
+        return null;
+      };
 
-          if (res.status === 401 || res.status === 403) {
-            apiFailureReason = 'auth';
-            continue;
-          }
+      if (venueId) {
+        const byId = await tryEventsQuery(`venueId=${encodeURIComponent(venueId)}`);
+        if (byId) return byId;
+      }
 
-          if (res.status === 429) {
-            apiFailureReason = 'rate_limit';
-            continue;
-          }
+      if (apiFailureReason !== 'auth' && apiFailureReason !== 'rate_limit') {
+        const byName = await tryEventsQuery(`venueName=${encodeURIComponent(venueName)}`);
+        if (byName) return byName;
+      }
 
-          if (res.ok) {
-            const text = await res.text();
-            const trimmed = text.trim();
-            if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
-
-            const data = JSON.parse(trimmed);
-            let rawEvents = Array.isArray(data) ? data : (data.events || data.records || data.data || null);
-
-            if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
-              const todayStr = new Date().toDateString();
-              const events = rawEvents.map(ev => {
-                const startDateStr = ev.startDate || ev.eventDate || ev.dateTime || ev.date;
-                const startDate = startDateStr ? new Date(startDateStr) : null;
-                const isToday = startDate ? startDate.toDateString() === todayStr : false;
-
-                let title = ev.name || ev.title || '';
-                if (!title && ev.performer) {
-                  title = Array.isArray(ev.performer) ? ev.performer.map(p => p.name || p).join(', ') : (ev.performer.name || ev.performer);
-                }
-                if (!title) title = 'Concert';
-
-                return {
-                  title: title,
-                  date: startDate ? startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' }) : '',
-                  time: startDate ? startDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
-                  isToday: isToday,
-                  url: ev.url || ev.ticketUrl || `https://www.jambase.com/venue/${cleanId}`,
-                };
-              });
-
-              const finalShows = events.slice(0, 5);
-              console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
-              this.setCachedShows(cleanId, finalShows);
-              return finalShows;
-            }
+      if (apiFailureReason !== 'auth' && apiFailureReason !== 'rate_limit') {
+        const venueSearch = await this._fetchJamBaseApi(
+          `/venues?venueName=${encodeURIComponent(venueName)}&perPage=5`,
+          apiKey
+        );
+        if (venueSearch.failureReason) {
+          apiFailureReason = venueSearch.failureReason;
+        } else {
+          const venues = this._venueListFromPayload(venueSearch.data);
+          const match = venues.find((v) => v && (v.identifier || v.id));
+          const resolvedId = match?.identifier || match?.id;
+          if (resolvedId) {
+            const byResolved = await tryEventsQuery(`venueId=${encodeURIComponent(resolvedId)}`);
+            if (byResolved) return byResolved;
           } else if (!apiFailureReason) {
-            apiFailureReason = 'error';
-          }
-        } catch (err) {
-          console.warn('JamBase v3 API endpoint attempt error:', err);
-          if (!apiFailureReason) {
-            apiFailureReason = 'network';
+            apiFailureReason = 'no_results';
           }
         }
       }
 
-      if (apiFailureReason) {
-        this._notifyApiFallback(apiFailureReason);
-      }
+      console.warn('JamBase Data API unavailable, using HTML scraper fallback:', apiFailureReason || 'error');
+      this._notifyApiFallback(apiFailureReason || 'error');
     }
 
-    // 2. Fallback to dual CORS proxy HTML scraper if no key is configured or API failed
+    // Fallback: scrape JamBase venue HTML via CORS proxies if no key is configured or the API failed.
     const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
     const proxyUrls = [
       `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,

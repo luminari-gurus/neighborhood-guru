@@ -45,4 +45,25 @@ describe('same-origin app and HTTP AuthClient', () => {
     let calls = 0; const original = globalThis.fetch; globalThis.fetch = async () => { calls += 1; throw new Error('network'); };
     try { const client = createAnonymousAuthClient(); await client.discoverProviders(); await client.loadSession(); expect(calls).toBe(0); } finally { globalThis.fetch = original; }
   });
+  test('JamBase proxy forwards v3 GETs with Authorization and rejects non-v3 paths', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ng-static-')); roots.push(root); mkdirSync(join(root, 'assets'));
+    writeFileSync(join(root, 'index.html'), '<script>globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};</script><main>app</main>');
+    const config = { mode: 'optional', secret: 's'.repeat(32), databasePath: ':memory:', production: false };
+    const backend = createAuthBackend({ config, providers: [] });
+    const upstream = [];
+    const fetchImpl = async (url, init) => {
+      upstream.push([url, init]);
+      return Response.json({ events: [] });
+    };
+    const fetch = createAppHandler({ authBackend: backend, config, distDirectory: root, fetchImpl });
+    expect((await fetch(new Request('https://app.example/api-jambase/not-v3'))).status).toBe(404);
+    const proxied = await fetch(new Request('https://app.example/api-jambase/v3/events?venueName=Fillmore', {
+      headers: { authorization: 'Bearer jbd_test' },
+    }));
+    expect(proxied.status).toBe(200);
+    expect(await proxied.json()).toEqual({ events: [] });
+    expect(upstream[0][0]).toBe('https://api.data.jambase.com/v3/events?venueName=Fillmore');
+    expect(upstream[0][1].headers.Authorization).toBe('Bearer jbd_test');
+    backend.close();
+  });
 });

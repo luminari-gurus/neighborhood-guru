@@ -271,6 +271,8 @@ class NeighborhoodGuruApp {
       const jbToken = el.settingsJambaseToken ? el.settingsJambaseToken.value.trim() : '';
       this.storage.setMapboxToken(token);
       this.storage.setJambaseToken(jbToken);
+      JamBaseService.clearShowsCache();
+      JamBaseService.resetApiFallbackNotification();
       this.ui.closeSettingsModal();
       this.ui.showToast('Settings saved. Reloading map...', 'success');
       setTimeout(() => window.location.reload(), 1000);

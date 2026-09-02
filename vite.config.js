@@ -22,9 +22,14 @@ export default defineConfig(({ command, mode }) => {
       proxy: {
         '/api/auth': { target: env.AUTH_DEV_SERVER || 'http://localhost:3000', changeOrigin: true },
         '/api-jambase': {
-          target: 'https://www.jambase.com',
+          target: 'https://api.data.jambase.com',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api-jambase/, ''),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              proxyReq.setHeader('User-Agent', 'NeighborhoodGuru/1.0');
+            });
+          },
         },
       },
     },
