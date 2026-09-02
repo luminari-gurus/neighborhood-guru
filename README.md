@@ -113,6 +113,13 @@ Set these **server-only** values in `.env` (do not prefix them with `VITE_`; the
 AUTH_MODE=optional
 AUTH_DATABASE_PATH=./neighborhood-guru.sqlite
 AUTH_SECRET=replace-with-at-least-32-random-characters
+
+# Generic OpenID Connect (optional). Leave OIDC_ISSUER empty to keep anonymous local-first.
+OIDC_ISSUER=
+OIDC_CLIENT_ID=
+OIDC_CLIENT_SECRET=
+OIDC_SCOPES=openid profile email
+OIDC_REDIRECT_PATH=/api/auth/callback/oidc
 ```
 
 `AUTH_DATABASE_PATH` is required whenever `AUTH_MODE` is `optional` or `required`, in every environment, so sessions persist across restarts. `:memory:` is used only when you set `AUTH_DATABASE_PATH=:memory:` explicitly (for tests).
@@ -130,10 +137,11 @@ The production server injects only `{ authMode }` into the built HTML. Database 
 
 Enabled authentication always requires an `AUTH_SECRET` of at least 32 characters. It keys purpose-separated HMAC-SHA-256 hashes for session tokens, login state, and CSRF material. Changing it deliberately invalidates all outstanding login transactions and sessions; stale session cookies are actively cleared when users start a new login under the rotated secret so recovery is usually a single click, while callbacks remain fail-closed when stale cookies are still attached.
 
-The provider-neutral API exposes discovery, session, login/callback, and CSRF-protected logout under `/api/auth`. No concrete identity provider is bundled. Adapters implement `createAuthorizationUrl` and `exchangeCallback`; provider context is optional, typed JSON-safe, and bounded.
+The provider-neutral API exposes discovery, session, login/callback, and CSRF-protected logout under `/api/auth`. `createServer({ providers, providerRegistry })` remains the adapter boundary. When `OIDC_ISSUER` and `OIDC_CLIENT_ID` are set, the server registers one generic OpenID Connect adapter (authorization code + PKCE). Discovery, JWKS, and ID-token validation are issuer-agnostic: there is no Apple- or Google-specific UI or adapter. Frontend login still uses the HTTP AuthClient against `/api/auth/providers`.
 In `required` mode, the provider list and callback bootstrap live in separate runtime composition layers (`createServer({ providerRegistry })` plus `createAuthBackend`) and are used by the generic required-mode UI.
-Login state is stored as a server-owned keyed hash, bound to provider and return path, expires, and is claimed/consumed before provider callback exchange. On adapter failure, exchange failure, or final DB conflict, consumed state remains consumed; users restart from a new login flow.
-Authentication data consists of user profiles, identities uniquely keyed by `(issuer, subject)`, and opaque HMAC-bound sessions.
+Login state is stored as a server-owned keyed hash, bound to provider and return path, expires, and is claimed/consumed before provider callback exchange. PKCE verifier and nonce live in that short-lived adapter context and are scrubbed when the login is claimed. On adapter failure, exchange failure, or final DB conflict, consumed state remains consumed; users restart from a new login flow.
+ID tokens are validated for issuer, audience, signature, expiry, and nonce. Provider access/refresh tokens stay on the server for the code exchange only and are never written to cookies or browser storage.
+Authentication data consists of user profiles, identities uniquely keyed by `(issuer, subject)`, and opaque HMAC-bound sessions. Email is profile data, not an identity key.
 
 ---
 
