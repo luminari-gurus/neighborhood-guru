@@ -10,6 +10,8 @@ import {
 import { verifyIdToken } from './jwt.js';
 import { discoveryUrlFor, logOidc, secureAbsoluteUrl } from './urls.js';
 
+const decoder = new TextDecoder();
+
 function createBoundedCache({ clock, maxEntries = OIDC_CACHE_MAX_ENTRIES }) {
   const entries = new Map();
   return {
@@ -34,27 +36,68 @@ function createBoundedCache({ clock, maxEntries = OIDC_CACHE_MAX_ENTRIES }) {
   };
 }
 
-async function readBoundedJson(response, maxBytes) {
-  const contentLength = response.headers.get('content-length');
-  if (contentLength !== null) {
-    if (!/^\d+$/.test(contentLength)) throw Object.assign(new Error('invalid_json'), { reason: 'invalid_content_length' });
-    const length = Number(contentLength);
-    if (!Number.isSafeInteger(length) || length > maxBytes) throw Object.assign(new Error('response_too_large'), { reason: 'response_too_large' });
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.byteLength > maxBytes) throw Object.assign(new Error('response_too_large'), { reason: 'response_too_large' });
-  try {
-    return JSON.parse(buffer.toString('utf8'));
-  } catch {
-    throw Object.assign(new Error('invalid_json'), { reason: 'invalid_json' });
-  }
-}
-
 function fail(reason, extra) {
   const error = new Error(reason);
   error.reason = reason;
   Object.assign(error, extra);
   return error;
+}
+
+function formEncode(value) {
+  return encodeURIComponent(value).replace(/%20/g, '+');
+}
+
+function basicAuthorization(clientId, clientSecret) {
+  return `Basic ${Buffer.from(`${formEncode(clientId)}:${formEncode(clientSecret)}`).toString('base64')}`;
+}
+
+function selectTokenAuthMethod(advertised, clientSecret) {
+  const methods = Array.isArray(advertised) ? advertised : null;
+  if (clientSecret) {
+    const supported = methods || ['client_secret_basic'];
+    if (supported.includes('client_secret_basic')) return 'client_secret_basic';
+    if (supported.includes('client_secret_post')) return 'client_secret_post';
+    throw fail('unsupported_token_auth', { detail: 'confidential' });
+  }
+  const supported = methods || ['none'];
+  if (supported.includes('none')) return 'none';
+  throw fail('unsupported_token_auth', { detail: 'public' });
+}
+
+async function readBoundedJson(response, maxBytes) {
+  const contentLength = response.headers.get('content-length');
+  if (contentLength !== null) {
+    if (!/^\d+$/.test(contentLength)) throw fail('invalid_content_length');
+    const length = Number(contentLength);
+    if (!Number.isSafeInteger(length) || length > maxBytes) {
+      await response.body?.cancel?.();
+      throw fail('response_too_large');
+    }
+  }
+  if (!response.body?.getReader) throw fail('invalid_json');
+  let size = 0;
+  let body = '';
+  const reader = response.body.getReader();
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    if (!(chunk.value instanceof Uint8Array)) {
+      await reader.cancel();
+      throw fail('invalid_json');
+    }
+    size += chunk.value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      throw fail('response_too_large');
+    }
+    body += decoder.decode(chunk.value, { stream: true });
+  }
+  body += decoder.decode();
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw fail('invalid_json');
+  }
 }
 
 export function createOidcClient(options) {
@@ -72,7 +115,7 @@ export function createOidcClient(options) {
 
   async function requestJson(url, init = {}) {
     const target = secureAbsoluteUrl(url, production);
-    if (!target || target.search || target.hash) throw fail('insecure_endpoint', { urlType: init.urlType });
+    if (!target || target.hash) throw fail('insecure_endpoint', { urlType: init.urlType });
     let response;
     try {
       response = await fetchImpl(target.href, {
@@ -97,18 +140,18 @@ export function createOidcClient(options) {
     const token = secureAbsoluteUrl(document.token_endpoint, production);
     const jwks = secureAbsoluteUrl(document.jwks_uri, production);
     if (!authorization || !token || !jwks) throw fail('insecure_endpoint', { detail: 'metadata_endpoints' });
-    if (authorization.search || token.search || jwks.search || authorization.hash || token.hash || jwks.hash) {
-      throw fail('invalid_metadata', { detail: 'endpoint_query' });
-    }
+    if (authorization.hash || token.hash || jwks.hash) throw fail('invalid_metadata', { detail: 'endpoint_fragment' });
     const methods = document.code_challenge_methods_supported;
     if (Array.isArray(methods) && !methods.includes('S256')) throw fail('missing_s256');
     const algs = document.id_token_signing_alg_values_supported;
     if (Array.isArray(algs) && !algs.includes('RS256') && !algs.includes('ES256')) throw fail('unsupported_algorithm');
+    const tokenAuthMethod = selectTokenAuthMethod(document.token_endpoint_auth_methods_supported, clientSecret);
     return Object.freeze({
       issuer,
       authorization_endpoint: authorization.href,
       token_endpoint: token.href,
       jwks_uri: jwks.href,
+      tokenAuthMethod,
     });
   }
 
@@ -176,13 +219,18 @@ export function createOidcClient(options) {
       client_id: clientId,
       code_verifier: codeVerifier,
     });
-    if (clientSecret) body.set('client_secret', clientSecret);
+    const headers = { 'content-type': 'application/x-www-form-urlencoded' };
+    if (metadata.tokenAuthMethod === 'client_secret_basic') {
+      headers.authorization = basicAuthorization(clientId, clientSecret);
+    } else if (metadata.tokenAuthMethod === 'client_secret_post') {
+      body.set('client_secret', clientSecret);
+    }
     let document;
     try {
       document = await requestJson(metadata.token_endpoint, {
         method: 'POST',
         urlType: 'token',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        headers,
         body,
       });
     } catch (error) {

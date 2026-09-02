@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { OIDC_CLOCK_SKEW_SECONDS, OIDC_MAX_ID_TOKEN_LENGTH, OIDC_SUPPORTED_ALGS } from './constants.js';
+import { OIDC_CLOCK_SKEW_SECONDS, OIDC_ID_TOKEN_TTL_SECONDS, OIDC_MAX_ID_TOKEN_LENGTH, OIDC_SUPPORTED_ALGS } from './constants.js';
 
 const encoder = new TextEncoder();
 
@@ -106,7 +106,7 @@ export async function verifyJwtSignature(parsed, jwk) {
   }
 }
 
-export function validateIdTokenClaims(payload, { issuer, audience, nonce, clock, skewSeconds = OIDC_CLOCK_SKEW_SECONDS }) {
+export function validateIdTokenClaims(payload, { issuer, audience, nonce, clock, skewSeconds = OIDC_CLOCK_SKEW_SECONDS, maxAgeSeconds = OIDC_ID_TOKEN_TTL_SECONDS }) {
   const now = Math.floor(clock() / 1000);
   if (typeof payload.iss !== 'string' || payload.iss !== issuer) return 'invalid_issuer';
   const aud = audiences(payload.aud);
@@ -116,8 +116,10 @@ export function validateIdTokenClaims(payload, { issuer, audience, nonce, clock,
   if (exp === null || exp <= now - skewSeconds) return 'expired';
   const nbf = payload.nbf === undefined ? null : numericClaim(payload.nbf);
   if (payload.nbf !== undefined && (nbf === null || nbf > now + skewSeconds)) return 'not_yet_valid';
-  const iat = payload.iat === undefined ? null : numericClaim(payload.iat);
-  if (payload.iat !== undefined && (iat === null || iat > now + skewSeconds)) return 'invalid_issued_at';
+  const iat = numericClaim(payload.iat);
+  if (iat === null) return 'missing_issued_at';
+  if (iat > now + skewSeconds) return 'invalid_issued_at';
+  if (iat < now - maxAgeSeconds - skewSeconds) return 'stale_issued_at';
   if (typeof payload.sub !== 'string' || !payload.sub.trim()) return 'missing_subject';
   if (typeof payload.nonce !== 'string' || !equal(payload.nonce, nonce)) return 'nonce_mismatch';
   return null;

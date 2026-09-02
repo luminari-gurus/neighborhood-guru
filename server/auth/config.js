@@ -8,5 +8,6 @@ export function loadAuthConfig(environment = process.env) {
   const secret = environment.AUTH_SECRET || '';
   if (mode !== AUTH_MODES.DISABLED && !databasePath) throw new Error('Authentication is enabled but AUTH_DATABASE_PATH is missing');
   if (mode !== AUTH_MODES.DISABLED && production && secret.length < 32) throw new Error('Authentication is enabled but AUTH_DATABASE_PATH or a 32+ character AUTH_SECRET is missing');
-  return Object.freeze({ mode, databasePath: databasePath || ':memory:', secret, production, oidc: loadOidcConfig(environment, { production }) });
+  const oidc = mode === AUTH_MODES.DISABLED ? null : loadOidcConfig(environment, { production });
+  return Object.freeze({ mode, databasePath: databasePath || ':memory:', secret, production, oidc });
 }

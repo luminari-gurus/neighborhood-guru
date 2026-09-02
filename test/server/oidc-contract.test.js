@@ -10,6 +10,7 @@ import {
 } from '../../server/auth/constants.js';
 import { createOidcProvider } from '../../server/auth/oidc/adapter.js';
 import { loadOidcConfig } from '../../server/auth/oidc/config.js';
+import { OIDC_ID_TOKEN_TTL_SECONDS, OIDC_MAX_RESPONSE_BYTES } from '../../server/auth/oidc/constants.js';
 import { createServer } from '../../server/server.js';
 import { createFakeOidcIssuer } from './fake-oidc-issuer.js';
 
@@ -49,14 +50,15 @@ function capturingLogger() {
   };
 }
 
-async function createHarness({ issuer, issuerOptions, fetch: fetchImpl, logger, clock } = {}) {
-  issuer = issuer || await createFakeOidcIssuer({ clock: clock || (() => NOW), randomBytes: deterministicRandom, ...issuerOptions });
+async function createHarness({ issuer, issuerOptions, fetch: fetchImpl, logger, clock, clientSecret = null } = {}) {
+  issuer = issuer || await createFakeOidcIssuer({ clock: clock || (() => NOW), randomBytes: deterministicRandom, clientSecret, ...issuerOptions });
   const logs = logger || capturingLogger();
   const database = new Database(':memory:');
   databases.push(database);
   const provider = createOidcProvider({
     issuer: issuer.issuer,
     clientId: issuer.clientId,
+    clientSecret,
     scopes: 'openid profile email',
     redirectPath: '/api/auth/callback/oidc',
     production: false,
@@ -147,6 +149,19 @@ describe('OIDC configuration schema', () => {
       OIDC_CLIENT_ID: 'id',
       OIDC_REDIRECT_PATH: '/elsewhere',
     })).toThrow('OIDC_REDIRECT_PATH');
+  });
+
+  test('disabled mode ignores partial OIDC environment and does not construct a provider', async () => {
+    const config = loadAuthConfig({ AUTH_MODE: 'disabled', OIDC_ISSUER: 'https://issuer.example' });
+    expect(config.mode).toBe(AUTH_MODES.DISABLED);
+    expect(config.oidc).toBeNull();
+    expect(() => loadOidcConfig({ OIDC_ISSUER: 'https://issuer.example' })).toThrow('OIDC_CLIENT_ID');
+    const instance = createServer({
+      config: { mode: AUTH_MODES.DISABLED, databasePath: ':memory:', secret: '', production: false, oidc: { issuer: 'https://issuer.example' } },
+      serve: false,
+    });
+    expect((await instance.fetch(request('/api/auth/providers'))).status).toBe(404);
+    instance.close();
   });
 
   test('createServer registers the generic OIDC adapter from deployment config', async () => {
@@ -308,12 +323,19 @@ describe('OIDC contract: login, callback, identity, and logout', () => {
     expect(again.api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
   });
 
-  test('bad issuer, audience, signature, and expiry fail closed', async () => {
+  test('bad issuer, audience, signature, expiry, and issued-at fail closed', async () => {
+    const now = Math.floor(NOW / 1000);
     const faults = [
       ({ header, payload }) => ({ header, payload: { ...payload, iss: 'https://evil.example' } }),
       ({ header, payload }) => ({ header, payload: { ...payload, aud: 'someone-else' } }),
       ({ header, payload }) => ({ header, payload, corruptSignature: true }),
-      ({ header, payload }) => ({ header, payload: { ...payload, exp: Math.floor(NOW / 1000) - 120 } }),
+      ({ header, payload }) => ({ header, payload: { ...payload, exp: now - 120 } }),
+      ({ header, payload }) => {
+        const next = { ...payload };
+        delete next.iat;
+        return { header, payload: next };
+      },
+      ({ header, payload }) => ({ header, payload: { ...payload, iat: now - OIDC_ID_TOKEN_TTL_SECONDS - 120, exp: now + 300 } }),
     ];
     for (const mutate of faults) {
       const { api, issuer } = await createHarness();
@@ -421,5 +443,96 @@ describe('OIDC discovery, JWKS, and key rotation failures', () => {
     expect(result.callback.status).toBe(400);
     expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
     expect(logs.entries.some((entry) => entry.level === 'error' && String(entry.message).includes('jwks_key_rotation_failed'))).toBe(true);
+  });
+
+  test('chunked responses without Content-Length are cancelled at the byte bound', async () => {
+    const encoder = new TextEncoder();
+    let produced = 0;
+    let cancelled = false;
+    const fetchImpl = async () => new Response(new ReadableStream({
+      pull(controller) {
+        produced += 2048;
+        controller.enqueue(encoder.encode(`{"pad":"${'a'.repeat(2040)}"}`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }), { headers: { 'content-type': 'application/json' } });
+    const { api, logs } = await createHarness({ fetch: fetchImpl });
+    const login = await beginLogin(api);
+    expect(login.response.status).toBe(502);
+    expect(cancelled).toBe(true);
+    expect(produced).toBeGreaterThan(OIDC_MAX_RESPONSE_BYTES);
+    expect(produced).toBeLessThan(OIDC_MAX_RESPONSE_BYTES + 8192);
+    expect(logs.entries.some((entry) => entry.details?.reason === 'response_too_large')).toBe(true);
+  });
+
+  test('authorization, token, and JWKS query components are preserved', async () => {
+    const requested = [];
+    const issuer = await createFakeOidcIssuer({
+      clock: () => NOW,
+      randomBytes: deterministicRandom,
+      endpointQuery: 'tenant=acme',
+    });
+    const fetchImpl = async (url, init) => {
+      requested.push(String(url));
+      return issuer.fetch(url, init);
+    };
+    const { api } = await createHarness({ issuer, fetch: fetchImpl });
+    const result = await completeLogin(api, issuer);
+    expect(result.callback.status).toBe(302);
+    const authorize = new URL(result.login.location);
+    expect(authorize.searchParams.get('tenant')).toBe('acme');
+    expect(authorize.searchParams.get('response_type')).toBe('code');
+    expect(requested.some((url) => url.includes('/token?tenant=acme'))).toBe(true);
+    expect(requested.some((url) => url.includes('/jwks?tenant=acme'))).toBe(true);
+  });
+
+  test('endpoint fragments remain rejected', async () => {
+    const { api, issuer, logs } = await createHarness();
+    issuer.setMetadata({
+      ...issuer.metadata,
+      authorization_endpoint: `${issuer.issuer}/authorize#frag`,
+    });
+    const login = await beginLogin(api);
+    expect(login.response.status).toBe(502);
+    expect(logs.entries.some((entry) => entry.details?.detail === 'endpoint_fragment' || entry.details?.reason === 'invalid_metadata')).toBe(true);
+  });
+
+  test('confidential clients use client_secret_basic when discovery omits auth methods', async () => {
+    const { api, issuer } = await createHarness({ clientSecret: 's3cret-value' });
+    const result = await completeLogin(api, issuer);
+    expect(result.callback.status).toBe(302);
+    expect(issuer.lastTokenAuth).toEqual({
+      method: 'client_secret_basic',
+      clientId: issuer.clientId,
+      clientSecret: 's3cret-value',
+      bodyHasSecret: false,
+    });
+  });
+
+  test('confidential clients use client_secret_post when advertised', async () => {
+    const { api, issuer } = await createHarness({
+      clientSecret: 's3cret-value',
+      issuerOptions: { tokenEndpointAuthMethods: ['client_secret_post'], requireTokenAuth: 'client_secret_post' },
+    });
+    const result = await completeLogin(api, issuer);
+    expect(result.callback.status).toBe(302);
+    expect(issuer.lastTokenAuth).toEqual({
+      method: 'client_secret_post',
+      clientId: issuer.clientId,
+      clientSecret: 's3cret-value',
+      bodyHasSecret: true,
+    });
+  });
+
+  test('unsupported token endpoint auth methods fail closed', async () => {
+    const { api, logs } = await createHarness({
+      clientSecret: 's3cret-value',
+      issuerOptions: { tokenEndpointAuthMethods: ['private_key_jwt'] },
+    });
+    const login = await beginLogin(api);
+    expect(login.response.status).toBe(502);
+    expect(logs.entries.some((entry) => entry.details?.reason === 'unsupported_token_auth')).toBe(true);
   });
 });

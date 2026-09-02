@@ -32,11 +32,43 @@ function randomToken(randomBytes, length = 32) {
   return Buffer.from(randomBytes(length)).toString('base64url');
 }
 
+function headerValue(init, name) {
+  const headers = init?.headers;
+  if (!headers) return null;
+  if (typeof headers.get === 'function') return headers.get(name);
+  const key = Object.keys(headers).find((entry) => entry.toLowerCase() === name.toLowerCase());
+  return key ? headers[key] : null;
+}
+
+function formDecode(value) {
+  return decodeURIComponent(String(value).replace(/\+/g, ' '));
+}
+
+function parseClientAuth(init, form) {
+  const authorization = headerValue(init, 'authorization');
+  if (typeof authorization === 'string' && authorization.startsWith('Basic ')) {
+    const decoded = Buffer.from(authorization.slice(6), 'base64').toString('utf8');
+    const colon = decoded.indexOf(':');
+    return {
+      method: 'client_secret_basic',
+      clientId: formDecode(colon < 0 ? decoded : decoded.slice(0, colon)),
+      clientSecret: formDecode(colon < 0 ? '' : decoded.slice(colon + 1)),
+      bodyHasSecret: form.get('client_secret') != null,
+    };
+  }
+  if (form.get('client_secret')) {
+    return { method: 'client_secret_post', clientId: form.get('client_id'), clientSecret: form.get('client_secret'), bodyHasSecret: true };
+  }
+  return { method: 'none', clientId: form.get('client_id'), clientSecret: null, bodyHasSecret: false };
+}
+
 export async function createFakeOidcIssuer(options = {}) {
   const origin = options.origin || 'https://issuer.example';
   const clientId = options.clientId || 'test-client';
+  const clientSecret = options.clientSecret || null;
   const clock = options.clock || (() => Date.now());
   const randomBytes = options.randomBytes || ((length) => crypto.getRandomValues(new Uint8Array(length)));
+  const endpointQuery = options.endpointQuery ? `?${options.endpointQuery.replace(/^\?/, '')}` : '';
   let signing = options.keys || await generateRs256KeyPair('test-key');
   const retiredKeys = [];
   const codes = new Map();
@@ -44,17 +76,19 @@ export async function createFakeOidcIssuer(options = {}) {
   let nextTokenMutator = null;
   let publishSigningKey = true;
   let metadataOverride = null;
+  let lastTokenAuth = null;
 
   const metadata = Object.freeze({
     issuer: origin,
-    authorization_endpoint: `${origin}/authorize`,
-    token_endpoint: `${origin}/token`,
-    jwks_uri: `${origin}/jwks`,
+    authorization_endpoint: `${origin}/authorize${endpointQuery}`,
+    token_endpoint: `${origin}/token${endpointQuery}`,
+    jwks_uri: `${origin}/jwks${endpointQuery}`,
     response_types_supported: Object.freeze(['code']),
     subject_types_supported: Object.freeze(['public']),
     id_token_signing_alg_values_supported: Object.freeze(['RS256']),
     code_challenge_methods_supported: Object.freeze(['S256']),
     scopes_supported: Object.freeze(['openid', 'profile', 'email']),
+    ...(options.tokenEndpointAuthMethods ? { token_endpoint_auth_methods_supported: Object.freeze([...options.tokenEndpointAuthMethods]) } : {}),
   });
 
   async function handle(input, init = {}) {
@@ -102,11 +136,20 @@ export async function createFakeOidcIssuer(options = {}) {
     if (url.pathname === '/token' && method === 'POST') {
       const raw = typeof init.body === 'string' ? init.body : init.body == null ? '' : String(init.body);
       const form = new URLSearchParams(raw);
+      const auth = parseClientAuth(init, form);
+      lastTokenAuth = auth;
+      const presentedClientId = auth.clientId || form.get('client_id');
       const record = codes.get(form.get('code'));
       if (!record || record.consumed) return Response.json({ error: 'invalid_grant' }, { status: 400 });
       if (form.get('grant_type') !== 'authorization_code') return Response.json({ error: 'unsupported_grant_type' }, { status: 400 });
-      if (form.get('redirect_uri') !== record.redirectUri || form.get('client_id') !== record.clientId) {
+      if (form.get('redirect_uri') !== record.redirectUri || presentedClientId !== record.clientId) {
         return Response.json({ error: 'invalid_grant' }, { status: 400 });
+      }
+      if (clientSecret) {
+        if (auth.clientSecret !== clientSecret) return Response.json({ error: 'invalid_client' }, { status: 401 });
+        if (options.requireTokenAuth && auth.method !== options.requireTokenAuth) {
+          return Response.json({ error: 'invalid_client' }, { status: 401 });
+        }
       }
       if (record.codeChallengeMethod !== 'S256' || await s256(form.get('code_verifier') || '') !== record.codeChallenge) {
         return Response.json({ error: 'invalid_grant' }, { status: 400 });
@@ -151,6 +194,9 @@ export async function createFakeOidcIssuer(options = {}) {
     metadata,
     codes,
     fetch: (input, init) => handle(input, init),
+    get lastTokenAuth() {
+      return lastTokenAuth;
+    },
     cancelNextAuthorize(error = 'access_denied') {
       nextAuthorizeError = error;
     },
