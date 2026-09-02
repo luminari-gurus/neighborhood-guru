@@ -1,3 +1,5 @@
+import { formEncode } from '../../server/auth/oidc/client.js';
+
 const encoder = new TextEncoder();
 
 export async function generateRs256KeyPair(kid = 'test-key') {
@@ -53,6 +55,7 @@ function parseClientAuth(init, form) {
       method: 'client_secret_basic',
       clientId: formDecode(colon < 0 ? decoded : decoded.slice(0, colon)),
       clientSecret: formDecode(colon < 0 ? '' : decoded.slice(colon + 1)),
+      encoded: decoded,
       bodyHasSecret: form.get('client_secret') != null,
     };
   }
@@ -88,7 +91,9 @@ export async function createFakeOidcIssuer(options = {}) {
     id_token_signing_alg_values_supported: Object.freeze(['RS256']),
     code_challenge_methods_supported: Object.freeze(['S256']),
     scopes_supported: Object.freeze(['openid', 'profile', 'email']),
-    ...(options.tokenEndpointAuthMethods ? { token_endpoint_auth_methods_supported: Object.freeze([...options.tokenEndpointAuthMethods]) } : {}),
+    ...(options.omitTokenAuthMethods
+      ? {}
+      : { token_endpoint_auth_methods_supported: Object.freeze(options.tokenEndpointAuthMethods || ['none']) }),
   });
 
   async function handle(input, init = {}) {
@@ -146,6 +151,11 @@ export async function createFakeOidcIssuer(options = {}) {
         return Response.json({ error: 'invalid_grant' }, { status: 400 });
       }
       if (clientSecret) {
+        if (options.strictBasicEncoding) {
+          if (auth.method !== 'client_secret_basic' || auth.encoded !== `${formEncode(clientId)}:${formEncode(clientSecret)}`) {
+            return Response.json({ error: 'invalid_client' }, { status: 401 });
+          }
+        }
         if (auth.clientSecret !== clientSecret) return Response.json({ error: 'invalid_client' }, { status: 401 });
         if (options.requireTokenAuth && auth.method !== options.requireTokenAuth) {
           return Response.json({ error: 'invalid_client' }, { status: 401 });

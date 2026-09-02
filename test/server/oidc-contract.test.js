@@ -9,6 +9,7 @@ import {
   SESSION_COOKIE_NAME,
 } from '../../server/auth/constants.js';
 import { createOidcProvider } from '../../server/auth/oidc/adapter.js';
+import { formEncode } from '../../server/auth/oidc/client.js';
 import { loadOidcConfig } from '../../server/auth/oidc/config.js';
 import { OIDC_ID_TOKEN_TTL_SECONDS, OIDC_MAX_RESPONSE_BYTES } from '../../server/auth/oidc/constants.js';
 import { createServer } from '../../server/server.js';
@@ -500,13 +501,17 @@ describe('OIDC discovery, JWKS, and key rotation failures', () => {
   });
 
   test('confidential clients use client_secret_basic when discovery omits auth methods', async () => {
-    const { api, issuer } = await createHarness({ clientSecret: 's3cret-value' });
+    const { api, issuer } = await createHarness({
+      clientSecret: 's3cret-value',
+      issuerOptions: { omitTokenAuthMethods: true },
+    });
     const result = await completeLogin(api, issuer);
     expect(result.callback.status).toBe(302);
     expect(issuer.lastTokenAuth).toEqual({
       method: 'client_secret_basic',
       clientId: issuer.clientId,
       clientSecret: 's3cret-value',
+      encoded: `${formEncode(issuer.clientId)}:${formEncode('s3cret-value')}`,
       bodyHasSecret: false,
     });
   });
@@ -534,5 +539,80 @@ describe('OIDC discovery, JWKS, and key rotation failures', () => {
     const login = await beginLogin(api);
     expect(login.response.status).toBe(502);
     expect(logs.entries.some((entry) => entry.details?.reason === 'unsupported_token_auth')).toBe(true);
+  });
+
+  test('omitted token auth metadata does not select none for a public client', async () => {
+    const { api, logs } = await createHarness({ issuerOptions: { omitTokenAuthMethods: true } });
+    const login = await beginLogin(api);
+    expect(login.response.status).toBe(502);
+    expect(logs.entries.some((entry) => entry.details?.reason === 'unsupported_token_auth')).toBe(true);
+    expect(logs.entries.some((entry) => entry.details?.detail === 'public')).toBe(true);
+  });
+
+  test('client_secret_basic form-encodes spaces and special credential characters', async () => {
+    const clientId = 'id !~()\'';
+    const clientSecret = 'secret !~()\'';
+    const { api, issuer } = await createHarness({
+      clientSecret,
+      issuerOptions: { clientId, omitTokenAuthMethods: true, strictBasicEncoding: true },
+    });
+    const result = await completeLogin(api, issuer);
+    expect(result.callback.status).toBe(302);
+    expect(issuer.lastTokenAuth.encoded).toBe('id+%21%7E%28%29%27:secret+%21%7E%28%29%27');
+    expect(issuer.lastTokenAuth.encoded).toBe(`${formEncode(clientId)}:${formEncode(clientSecret)}`);
+    expect(issuer.lastTokenAuth.bodyHasSecret).toBe(false);
+  });
+
+  test('oversized cancel after an incomplete UTF-8 sequence does not poison the next response', async () => {
+    const issuer = await createFakeOidcIssuer({ clock: () => NOW, randomBytes: deterministicRandom });
+    let discoveryCalls = 0;
+    const fetchImpl = async (url, init) => {
+      if (String(url).includes('.well-known')) {
+        discoveryCalls += 1;
+        if (discoveryCalls === 1) {
+          const prefix = new Uint8Array(OIDC_MAX_RESPONSE_BYTES);
+          prefix.fill(0x61);
+          prefix[0] = 0x7b;
+          prefix[prefix.length - 1] = 0xc3;
+          const overflow = new Uint8Array([0xa9, 0x61]);
+          return new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(prefix);
+              controller.enqueue(overflow);
+              controller.close();
+            },
+          }), { headers: { 'content-type': 'application/json' } });
+        }
+      }
+      return issuer.fetch(url, init);
+    };
+    const { api } = await createHarness({ issuer, fetch: fetchImpl });
+    expect((await beginLogin(api)).response.status).toBe(502);
+    expect((await beginLogin(api)).response.status).toBe(302);
+  });
+
+  test('concurrent bounded JSON reads do not interleave decoder state', async () => {
+    const issuer = await createFakeOidcIssuer({ clock: () => NOW, randomBytes: deterministicRandom });
+    const encoder = new TextEncoder();
+    const fetchImpl = async (url, init) => {
+      if (String(url).includes('.well-known')) {
+        const json = encoder.encode(JSON.stringify(issuer.metadata));
+        return new Response(new ReadableStream({
+          async start(controller) {
+            for (let offset = 0; offset < json.length; offset += 7) {
+              controller.enqueue(json.subarray(offset, offset + 7));
+              await Promise.resolve();
+            }
+            controller.close();
+          },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      return issuer.fetch(url, init);
+    };
+    const first = await createHarness({ issuer, fetch: fetchImpl });
+    const second = await createHarness({ issuer, fetch: fetchImpl });
+    const [left, right] = await Promise.all([beginLogin(first.api), beginLogin(second.api)]);
+    expect(left.response.status).toBe(302);
+    expect(right.response.status).toBe(302);
   });
 });

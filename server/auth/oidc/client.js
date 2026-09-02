@@ -10,8 +10,6 @@ import {
 import { verifyIdToken } from './jwt.js';
 import { discoveryUrlFor, logOidc, secureAbsoluteUrl } from './urls.js';
 
-const decoder = new TextDecoder();
-
 function createBoundedCache({ clock, maxEntries = OIDC_CACHE_MAX_ENTRIES }) {
   const entries = new Map();
   return {
@@ -43,8 +41,10 @@ function fail(reason, extra) {
   return error;
 }
 
-function formEncode(value) {
-  return encodeURIComponent(value).replace(/%20/g, '+');
+export function formEncode(value) {
+  return encodeURIComponent(value)
+    .replace(/%20/g, '+')
+    .replace(/[!'()~]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
 }
 
 function basicAuthorization(clientId, clientSecret) {
@@ -52,15 +52,13 @@ function basicAuthorization(clientId, clientSecret) {
 }
 
 function selectTokenAuthMethod(advertised, clientSecret) {
-  const methods = Array.isArray(advertised) ? advertised : null;
+  const methods = Array.isArray(advertised) ? advertised : ['client_secret_basic'];
   if (clientSecret) {
-    const supported = methods || ['client_secret_basic'];
-    if (supported.includes('client_secret_basic')) return 'client_secret_basic';
-    if (supported.includes('client_secret_post')) return 'client_secret_post';
+    if (methods.includes('client_secret_basic')) return 'client_secret_basic';
+    if (methods.includes('client_secret_post')) return 'client_secret_post';
     throw fail('unsupported_token_auth', { detail: 'confidential' });
   }
-  const supported = methods || ['none'];
-  if (supported.includes('none')) return 'none';
+  if (methods.includes('none')) return 'none';
   throw fail('unsupported_token_auth', { detail: 'public' });
 }
 
@@ -75,8 +73,8 @@ async function readBoundedJson(response, maxBytes) {
     }
   }
   if (!response.body?.getReader) throw fail('invalid_json');
+  const chunks = [];
   let size = 0;
-  let body = '';
   const reader = response.body.getReader();
   while (true) {
     const chunk = await reader.read();
@@ -90,11 +88,10 @@ async function readBoundedJson(response, maxBytes) {
       await reader.cancel();
       throw fail('response_too_large');
     }
-    body += decoder.decode(chunk.value, { stream: true });
+    chunks.push(chunk.value);
   }
-  body += decoder.decode();
   try {
-    return JSON.parse(body);
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
     throw fail('invalid_json');
   }
