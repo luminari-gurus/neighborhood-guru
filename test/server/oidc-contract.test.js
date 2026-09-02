@@ -131,6 +131,23 @@ describe('OIDC configuration schema', () => {
     });
   });
 
+  test('client id and secret keep leading, trailing, and all-space values', () => {
+    const spaced = loadOidcConfig({
+      OIDC_ISSUER: 'https://issuer.example/',
+      OIDC_CLIENT_ID: ' client ',
+      OIDC_CLIENT_SECRET: ' secret ',
+    });
+    expect(spaced.clientId).toBe(' client ');
+    expect(spaced.clientSecret).toBe(' secret ');
+    const blankSecret = loadOidcConfig({
+      OIDC_ISSUER: 'https://issuer.example/',
+      OIDC_CLIENT_ID: 'id',
+      OIDC_CLIENT_SECRET: '   ',
+    });
+    expect(blankSecret.clientId).toBe('id');
+    expect(blankSecret.clientSecret).toBe('   ');
+  });
+
   test('repository examples stay generic and redacted', async () => {
     const example = await Bun.file(new URL('../../.env.example', import.meta.url)).text();
     expect(example).toContain('OIDC_ISSUER=');
@@ -614,5 +631,166 @@ describe('OIDC discovery, JWKS, and key rotation failures', () => {
     const [left, right] = await Promise.all([beginLogin(first.api), beginLogin(second.api)]);
     expect(left.response.status).toBe(302);
     expect(right.response.status).toBe(302);
+  });
+
+  test('non-success provider bodies are cancelled before discovery returns', async () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const fetchImpl = async () => new Response(new ReadableStream({
+      pull(controller) {
+        controller.enqueue(encoder.encode(`{"error":"${'x'.repeat(2048)}"}`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }), { status: 500, headers: { 'content-type': 'application/json' } });
+    const { api, logs } = await createHarness({ fetch: fetchImpl });
+    const login = await beginLogin(api);
+    expect(login.response.status).toBe(502);
+    expect(cancelled).toBe(true);
+    expect(logs.entries.some((entry) => entry.details?.reason === 'http_error')).toBe(true);
+  });
+
+  test('malformed Content-Length cancels the body without reading it', async () => {
+    let cancelled = false;
+    const fetchImpl = async () => new Response(new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(2048));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }), { headers: { 'content-type': 'application/json', 'content-length': 'nope' } });
+    const { api, logs } = await createHarness({ fetch: fetchImpl });
+    expect((await beginLogin(api)).response.status).toBe(502);
+    expect(cancelled).toBe(true);
+    expect(logs.entries.some((entry) => entry.details?.reason === 'invalid_content_length')).toBe(true);
+  });
+
+  test('malformed token_endpoint_auth_methods_supported is rejected rather than defaulted', async () => {
+    const values = ['client_secret_basic', null, { method: 'client_secret_basic' }, ['client_secret_basic', 42], []];
+    for (const value of values) {
+      const { api, issuer, logs } = await createHarness({ clientSecret: 's3cret-value' });
+      issuer.setMetadata({ ...issuer.metadata, token_endpoint_auth_methods_supported: value });
+      expect((await beginLogin(api)).response.status).toBe(502);
+      expect(logs.entries.some((entry) => entry.details?.reason === 'invalid_metadata' && entry.details?.detail === 'token_endpoint_auth_methods_supported')).toBe(true);
+    }
+  });
+
+  test('required discovery capabilities reject absent, malformed, and incompatible values', async () => {
+    const fields = ['response_types_supported', 'subject_types_supported', 'id_token_signing_alg_values_supported'];
+    const malformed = ['code', null, { value: 'code' }, [], ['code', 42]];
+    for (const field of fields) {
+      const omitted = await createHarness();
+      const missing = { ...omitted.issuer.metadata };
+      delete missing[field];
+      omitted.issuer.setMetadata(missing);
+      expect((await beginLogin(omitted.api)).response.status).toBe(502);
+      expect(omitted.logs.entries.some((entry) => entry.details?.detail === field || entry.details?.reason === 'unsupported_algorithm')).toBe(true);
+      for (const value of malformed) {
+        const { api, issuer, logs } = await createHarness();
+        issuer.setMetadata({ ...issuer.metadata, [field]: value });
+        expect((await beginLogin(api)).response.status).toBe(502);
+        expect(logs.entries.some((entry) => entry.details?.reason === 'invalid_metadata' && entry.details?.detail === field)).toBe(true);
+      }
+    }
+    const noCode = await createHarness();
+    noCode.issuer.setMetadata({ ...noCode.issuer.metadata, response_types_supported: ['id_token'] });
+    expect((await beginLogin(noCode.api)).response.status).toBe(502);
+    expect(noCode.logs.entries.some((entry) => entry.details?.detail === 'response_types_supported')).toBe(true);
+    const hs256 = await createHarness();
+    hs256.issuer.setMetadata({ ...hs256.issuer.metadata, id_token_signing_alg_values_supported: ['HS256'] });
+    expect((await beginLogin(hs256.api)).response.status).toBe(502);
+    expect(hs256.logs.entries.some((entry) => entry.details?.reason === 'unsupported_algorithm')).toBe(true);
+  });
+
+  test('opaque client credentials are preserved on the token request', async () => {
+    const cases = [
+      { clientId: ' client ', clientSecret: ' secret ' },
+      { clientId: 'id', clientSecret: '   ' },
+    ];
+    for (const credentials of cases) {
+      const { api, issuer } = await createHarness({
+        clientSecret: credentials.clientSecret,
+        issuerOptions: {
+          clientId: credentials.clientId,
+          omitTokenAuthMethods: true,
+          strictBasicEncoding: true,
+        },
+      });
+      const result = await completeLogin(api, issuer);
+      expect(result.callback.status).toBe(302);
+      expect(issuer.lastTokenAuth.clientId).toBe(credentials.clientId);
+      expect(issuer.lastTokenAuth.clientSecret).toBe(credentials.clientSecret);
+      expect(issuer.lastTokenAuth.encoded).toBe(`${formEncode(credentials.clientId)}:${formEncode(credentials.clientSecret)}`);
+    }
+  });
+
+  test('ID tokens require a single trusted audience and matching azp', async () => {
+    const faults = [
+      ({ header, payload }) => ({ header, payload: { ...payload, aud: [payload.aud, 'untrusted'], azp: payload.aud } }),
+      ({ header, payload }) => ({ header, payload: { ...payload, azp: 'different-client' } }),
+      ({ header, payload }) => ({ header, payload: { ...payload, azp: ['client'] } }),
+    ];
+    for (const mutate of faults) {
+      const { api, issuer } = await createHarness();
+      issuer.mutateNextIdToken(mutate);
+      const result = await completeLogin(api, issuer);
+      expect(result.callback.status).toBe(400);
+      expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+    }
+  });
+
+  test('malformed UTF-8 in discovery JSON is rejected', async () => {
+    const issuer = await createFakeOidcIssuer({ clock: () => NOW, randomBytes: deterministicRandom });
+    const fetchImpl = async (url, init) => {
+      if (String(url).includes('.well-known')) {
+        const bytes = Buffer.from(JSON.stringify({ ...issuer.metadata, pad: 'GOODPAD' }));
+        bytes[bytes.indexOf(Buffer.from('GOODPAD'))] = 0xff;
+        return new Response(bytes, { headers: { 'content-type': 'application/json' } });
+      }
+      return issuer.fetch(url, init);
+    };
+    const { api, logs } = await createHarness({ issuer, fetch: fetchImpl });
+    expect((await beginLogin(api)).response.status).toBe(502);
+    expect(logs.entries.some((entry) => entry.details?.reason === 'invalid_json')).toBe(true);
+  });
+
+  test('malformed UTF-8 in a signed ID-token subject is rejected', async () => {
+    const { api, issuer } = await createHarness();
+    issuer.mutateNextIdToken(async ({ header, payload, signRaw }) => {
+      const bytes = Buffer.from(JSON.stringify({ ...payload, sub: 'user?' }));
+      bytes[bytes.indexOf('?'.charCodeAt(0))] = 0xff;
+      return { idToken: await signRaw(header, bytes) };
+    });
+    const result = await completeLogin(api, issuer);
+    expect(result.callback.status).toBe(400);
+    expect(api.database.query('SELECT count(*) count FROM users').get().count).toBe(0);
+    expect(api.database.query('SELECT count(*) count FROM external_identities').get().count).toBe(0);
+  });
+
+  test('unsupported and malformed crit headers are rejected', async () => {
+    for (const crit of [['unsupported'], 'unsupported', [1], []]) {
+      const { api, issuer } = await createHarness();
+      issuer.mutateNextIdToken(({ header, payload }) => ({ header: { ...header, crit }, payload }));
+      const result = await completeLogin(api, issuer);
+      expect(result.callback.status).toBe(400);
+      expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+    }
+  });
+
+  test('JWKS key_ops and use constraints are honored', async () => {
+    const restrictions = [
+      (jwk) => ({ ...jwk, key_ops: ['encrypt'] }),
+      (jwk) => ({ ...jwk, key_ops: ['sign'] }),
+      (jwk) => ({ ...jwk, use: 'sig', key_ops: ['verify', 'encrypt'] }),
+    ];
+    for (const mutate of restrictions) {
+      const { api, issuer } = await createHarness();
+      issuer.mutatePublicJwk(mutate);
+      const result = await completeLogin(api, issuer);
+      expect(result.callback.status).toBe(400);
+      expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+    }
   });
 });

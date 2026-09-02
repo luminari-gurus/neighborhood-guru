@@ -21,7 +21,11 @@ export async function generateRs256KeyPair(kid = 'test-key') {
 }
 
 export async function signJwt(privateKey, header, payload) {
-  const signingInput = `${Buffer.from(JSON.stringify(header)).toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
+  return signJwtBytes(privateKey, header, encoder.encode(JSON.stringify(payload)));
+}
+
+export async function signJwtBytes(privateKey, header, payloadBytes) {
+  const signingInput = `${Buffer.from(JSON.stringify(header)).toString('base64url')}.${Buffer.from(payloadBytes).toString('base64url')}`;
   const signature = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, privateKey, encoder.encode(signingInput));
   return `${signingInput}.${Buffer.from(signature).toString('base64url')}`;
 }
@@ -178,7 +182,12 @@ export async function createFakeOidcIssuer(options = {}) {
         name: 'Ada Lovelace',
         email: 'ada@example.test',
       };
-      const mutated = nextTokenMutator ? nextTokenMutator({ header, payload, record }) : null;
+      const mutated = nextTokenMutator ? await nextTokenMutator({
+        header,
+        payload,
+        record,
+        signRaw: (nextHeader, payloadBytes) => signJwtBytes(signing.privateKey, nextHeader, payloadBytes),
+      }) : null;
       nextTokenMutator = null;
       if (mutated?.header) header = mutated.header;
       if (mutated?.payload) payload = mutated.payload;
@@ -212,6 +221,9 @@ export async function createFakeOidcIssuer(options = {}) {
     },
     mutateNextIdToken(mutator) {
       nextTokenMutator = mutator;
+    },
+    mutatePublicJwk(mutator) {
+      signing.publicJwk = mutator({ ...signing.publicJwk });
     },
     async rotateKeys(next) {
       retiredKeys.push(signing);

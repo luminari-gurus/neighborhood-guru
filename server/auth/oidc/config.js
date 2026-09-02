@@ -13,6 +13,11 @@ function readString(environment, name) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function readOpaque(environment, name) {
+  const value = environment[name];
+  return typeof value === 'string' ? value : '';
+}
+
 function normalizeScopes(value) {
   const parts = (value || OIDC_DEFAULT_SCOPES).split(/\s+/).filter(Boolean);
   if (!parts.includes('openid')) parts.unshift('openid');
@@ -30,10 +35,10 @@ export function loadOidcConfig(environment = process.env, { production = false }
   const issuer = canonicalizeIssuer(issuerValue, production);
   if (!issuer) throw new Error('OIDC_ISSUER must be an https URL without query, hash, or credentials');
 
-  const clientId = readString(environment, 'OIDC_CLIENT_ID');
+  const clientId = readOpaque(environment, 'OIDC_CLIENT_ID');
   if (!clientId || clientId.length > 256) throw new Error('OIDC_CLIENT_ID is required when OIDC_ISSUER is set');
 
-  const clientSecret = readString(environment, 'OIDC_CLIENT_SECRET');
+  const clientSecret = readOpaque(environment, 'OIDC_CLIENT_SECRET');
   if (clientSecret.length > 4096) throw new Error('OIDC_CLIENT_SECRET is too long');
 
   const providerId = readString(environment, 'OIDC_PROVIDER_ID') || OIDC_DEFAULT_PROVIDER_ID;

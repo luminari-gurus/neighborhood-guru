@@ -6,6 +6,7 @@ import {
   OIDC_MAX_AUTHORIZATION_CODE_LENGTH,
   OIDC_MAX_KEYS,
   OIDC_MAX_RESPONSE_BYTES,
+  OIDC_SUPPORTED_ALGS,
 } from './constants.js';
 import { verifyIdToken } from './jwt.js';
 import { discoveryUrlFor, logOidc, secureAbsoluteUrl } from './urls.js';
@@ -51,8 +52,22 @@ function basicAuthorization(clientId, clientSecret) {
   return `Basic ${Buffer.from(`${formEncode(clientId)}:${formEncode(clientSecret)}`).toString('base64')}`;
 }
 
+function isNonEmptyStringArray(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === 'string' && entry.length > 0);
+}
+
+function requireStringArray(value, detail) {
+  if (!isNonEmptyStringArray(value)) throw fail('invalid_metadata', { detail });
+  return value;
+}
+
 function selectTokenAuthMethod(advertised, clientSecret) {
-  const methods = Array.isArray(advertised) ? advertised : ['client_secret_basic'];
+  let methods;
+  if (advertised === undefined) {
+    methods = ['client_secret_basic'];
+  } else {
+    methods = requireStringArray(advertised, 'token_endpoint_auth_methods_supported');
+  }
   if (clientSecret) {
     if (methods.includes('client_secret_basic')) return 'client_secret_basic';
     if (methods.includes('client_secret_post')) return 'client_secret_post';
@@ -62,17 +77,43 @@ function selectTokenAuthMethod(advertised, clientSecret) {
   throw fail('unsupported_token_auth', { detail: 'public' });
 }
 
+async function cancelBody(response) {
+  try {
+    await response.body?.cancel?.();
+  } catch {}
+}
+
+function parseJsonBytes(bytes) {
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw fail('invalid_json');
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw fail('invalid_json');
+  }
+}
+
 async function readBoundedJson(response, maxBytes) {
   const contentLength = response.headers.get('content-length');
   if (contentLength !== null) {
-    if (!/^\d+$/.test(contentLength)) throw fail('invalid_content_length');
+    if (!/^\d+$/.test(contentLength)) {
+      await cancelBody(response);
+      throw fail('invalid_content_length');
+    }
     const length = Number(contentLength);
     if (!Number.isSafeInteger(length) || length > maxBytes) {
-      await response.body?.cancel?.();
+      await cancelBody(response);
       throw fail('response_too_large');
     }
   }
-  if (!response.body?.getReader) throw fail('invalid_json');
+  if (!response.body?.getReader) {
+    await cancelBody(response);
+    throw fail('invalid_json');
+  }
   const chunks = [];
   let size = 0;
   const reader = response.body.getReader();
@@ -90,11 +131,7 @@ async function readBoundedJson(response, maxBytes) {
     }
     chunks.push(chunk.value);
   }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    throw fail('invalid_json');
-  }
+  return parseJsonBytes(Buffer.concat(chunks));
 }
 
 export function createOidcClient(options) {
@@ -126,7 +163,10 @@ export function createOidcClient(options) {
       const reason = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'network_error';
       throw fail(reason, { urlType: init.urlType });
     }
-    if (!response.ok) throw fail('http_error', { urlType: init.urlType, status: response.status });
+    if (!response.ok) {
+      await cancelBody(response);
+      throw fail('http_error', { urlType: init.urlType, status: response.status });
+    }
     return readBoundedJson(response, OIDC_MAX_RESPONSE_BYTES);
   }
 
@@ -138,10 +178,13 @@ export function createOidcClient(options) {
     const jwks = secureAbsoluteUrl(document.jwks_uri, production);
     if (!authorization || !token || !jwks) throw fail('insecure_endpoint', { detail: 'metadata_endpoints' });
     if (authorization.hash || token.hash || jwks.hash) throw fail('invalid_metadata', { detail: 'endpoint_fragment' });
+    const responseTypes = requireStringArray(document.response_types_supported, 'response_types_supported');
+    if (!responseTypes.includes('code')) throw fail('invalid_metadata', { detail: 'response_types_supported' });
+    requireStringArray(document.subject_types_supported, 'subject_types_supported');
+    const algs = requireStringArray(document.id_token_signing_alg_values_supported, 'id_token_signing_alg_values_supported');
+    if (!algs.some((alg) => OIDC_SUPPORTED_ALGS.includes(alg))) throw fail('unsupported_algorithm');
     const methods = document.code_challenge_methods_supported;
-    if (Array.isArray(methods) && !methods.includes('S256')) throw fail('missing_s256');
-    const algs = document.id_token_signing_alg_values_supported;
-    if (Array.isArray(algs) && !algs.includes('RS256') && !algs.includes('ES256')) throw fail('unsupported_algorithm');
+    if (methods !== undefined && (!isNonEmptyStringArray(methods) || !methods.includes('S256'))) throw fail('missing_s256');
     const tokenAuthMethod = selectTokenAuthMethod(document.token_endpoint_auth_methods_supported, clientSecret);
     return Object.freeze({
       issuer,

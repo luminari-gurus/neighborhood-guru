@@ -15,8 +15,14 @@ function decodeBase64Url(value) {
 function decodeJsonPart(part) {
   const bytes = decodeBase64Url(part);
   if (!bytes) return null;
+  let text;
   try {
-    const parsed = JSON.parse(bytes.toString('utf8'));
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     return parsed;
   } catch {
@@ -30,12 +36,35 @@ function equal(left, right) {
 
 function audiences(value) {
   if (typeof value === 'string' && value) return [value];
-  if (Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === 'string' && entry)) return value;
+  if (Array.isArray(value) && value.length === 1 && typeof value[0] === 'string' && value[0]) return value;
   return null;
 }
 
 function numericClaim(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+const SIG_KEY_OPS = new Set(['sign', 'verify']);
+const ENC_KEY_OPS = new Set(['encrypt', 'decrypt', 'wrapKey', 'unwrapKey']);
+
+function isNonEmptyStringArray(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === 'string' && entry.length > 0);
+}
+
+function jwkAllowsVerify(jwk, alg) {
+  if (!jwk || typeof jwk !== 'object') return false;
+  if (jwk.alg !== undefined && jwk.alg !== alg) return false;
+  const hasUse = jwk.use !== undefined;
+  const hasOps = jwk.key_ops !== undefined;
+  if (hasUse && jwk.use !== 'sig' && jwk.use !== 'enc') return false;
+  if (hasOps && !isNonEmptyStringArray(jwk.key_ops)) return false;
+  if (hasUse && hasOps) {
+    const allowed = jwk.use === 'sig' ? SIG_KEY_OPS : jwk.use === 'enc' ? ENC_KEY_OPS : null;
+    if (!allowed || jwk.key_ops.some((op) => !allowed.has(op))) return false;
+  }
+  if (hasUse && jwk.use !== 'sig') return false;
+  if (hasOps && !jwk.key_ops.includes('verify')) return false;
+  return true;
 }
 
 function publicJwk(jwk, alg) {
@@ -79,17 +108,21 @@ export function selectJwk(jwks, header) {
   const alg = header?.alg;
   if (!OIDC_SUPPORTED_ALGS.includes(alg)) return { key: null, unknownKid: false };
   const matching = keys.filter((key) => {
-    if (key?.use && key.use !== 'sig') return false;
-    if (key?.alg && key.alg !== alg) return false;
     if (alg === 'RS256') return key.kty === 'RSA';
     if (alg === 'ES256') return key.kty === 'EC' && key.crv === 'P-256';
     return false;
   });
+  let selected = null;
   if (typeof header.kid === 'string' && header.kid) {
-    const key = matching.find((entry) => entry.kid === header.kid) || null;
-    return { key, unknownKid: !key };
+    selected = matching.find((entry) => entry.kid === header.kid) || null;
+    if (!selected) return { key: null, unknownKid: true };
+  } else if (matching.length === 1) {
+    selected = matching[0];
+  } else {
+    return { key: null, unknownKid: matching.length === 0 };
   }
-  return { key: matching.length === 1 ? matching[0] : null, unknownKid: matching.length === 0 };
+  if (!jwkAllowsVerify(selected, alg)) return { key: null, unknownKid: false };
+  return { key: selected, unknownKid: false };
 }
 
 export async function verifyJwtSignature(parsed, jwk) {
@@ -110,8 +143,10 @@ export function validateIdTokenClaims(payload, { issuer, audience, nonce, clock,
   const now = Math.floor(clock() / 1000);
   if (typeof payload.iss !== 'string' || payload.iss !== issuer) return 'invalid_issuer';
   const aud = audiences(payload.aud);
-  if (!aud || !aud.includes(audience)) return 'invalid_audience';
-  if (aud.length > 1 && payload.azp !== audience) return 'invalid_audience';
+  if (!aud || !equal(aud[0], audience)) return 'invalid_audience';
+  if (payload.azp !== undefined && (typeof payload.azp !== 'string' || !payload.azp || !equal(payload.azp, audience))) {
+    return 'invalid_audience';
+  }
   const exp = numericClaim(payload.exp);
   if (exp === null || exp <= now - skewSeconds) return 'expired';
   const nbf = payload.nbf === undefined ? null : numericClaim(payload.nbf);
@@ -131,6 +166,10 @@ export async function verifyIdToken(token, { jwks, issuer, audience, nonce, cloc
   if (parsed.header.typ && parsed.header.typ !== 'JWT') return { ok: false, reason: 'invalid_typ' };
   if (!OIDC_SUPPORTED_ALGS.includes(parsed.header.alg) || parsed.header.alg === 'none') {
     return { ok: false, reason: 'unsupported_algorithm' };
+  }
+  if (parsed.header.crit !== undefined) {
+    if (!isNonEmptyStringArray(parsed.header.crit)) return { ok: false, reason: 'malformed_crit' };
+    return { ok: false, reason: 'unsupported_crit' };
   }
   const selected = selectJwk(jwks, parsed.header);
   if (!selected.key) return { ok: false, reason: selected.unknownKid ? 'unknown_kid' : 'invalid_signature' };
