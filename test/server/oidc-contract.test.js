@@ -9,11 +9,20 @@ import {
   SESSION_COOKIE_NAME,
 } from '../../server/auth/constants.js';
 import { createOidcProvider } from '../../server/auth/oidc/adapter.js';
-import { formEncode } from '../../server/auth/oidc/client.js';
+import { createOidcClient, formEncode } from '../../server/auth/oidc/client.js';
 import { loadOidcConfig } from '../../server/auth/oidc/config.js';
-import { OIDC_ID_TOKEN_TTL_SECONDS, OIDC_MAX_RESPONSE_BYTES } from '../../server/auth/oidc/constants.js';
+import {
+  OIDC_DISCOVERY_TTL_MS,
+  OIDC_ID_TOKEN_TTL_SECONDS,
+  OIDC_MAX_RESPONSE_BYTES,
+} from '../../server/auth/oidc/constants.js';
 import { createServer } from '../../server/server.js';
-import { createFakeOidcIssuer, generateEs256KeyPair, signJwt } from './fake-oidc-issuer.js';
+import {
+  createFakeOidcIssuer,
+  generateEs256KeyPair,
+  generateRs256KeyPair,
+  signJwt,
+} from './fake-oidc-issuer.js';
 
 const NOW = 1_700_000_000_000;
 const databases = [];
@@ -825,6 +834,124 @@ describe('OIDC discovery, JWKS, and key rotation failures', () => {
     for (const kid of [42, null, '']) {
       const { api, issuer } = await createHarness();
       issuer.mutateNextIdToken(({ header, payload }) => ({ header: { ...header, kid }, payload }));
+      const result = await completeLogin(api, issuer);
+      expect(result.callback.status).toBe(400);
+      expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+    }
+  });
+
+  test('JWKS cache follows the jwks_uri from refreshed discovery metadata', async () => {
+    let now = NOW;
+    let jwksUri = 'https://issuer.example/jwks-old';
+    let oldJwksCalls = 0;
+    let newJwksCalls = 0;
+    const oldKeys = await createFakeOidcIssuer({ clock: () => now, randomBytes: deterministicRandom });
+    const oldJwks = await (await oldKeys.fetch('https://issuer.example/jwks')).json();
+    const newKeys = await generateEs256KeyPair('new-key');
+    const metadata = () => ({
+      ...oldKeys.metadata,
+      jwks_uri: jwksUri,
+      id_token_signing_alg_values_supported: ['RS256', 'ES256'],
+    });
+    const client = createOidcClient({
+      issuer: oldKeys.issuer,
+      clientId: oldKeys.clientId,
+      production: false,
+      clock: () => now,
+      logger: capturingLogger(),
+      fetch: async (url) => {
+        const target = new URL(url);
+        if (target.pathname === '/.well-known/openid-configuration') return Response.json(metadata());
+        if (target.pathname === '/jwks-old') {
+          oldJwksCalls += 1;
+          return Response.json({ keys: oldJwks.keys });
+        }
+        if (target.pathname === '/jwks-new') {
+          newJwksCalls += 1;
+          return Response.json({ keys: [newKeys.publicJwk] });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+
+    await client.discover();
+    now += 1;
+    const first = await client.getJwks();
+    expect(first.keys[0].kid).toBe('test-key');
+
+    now += OIDC_DISCOVERY_TTL_MS - 1;
+    jwksUri = 'https://issuer.example/jwks-new';
+    await client.discover();
+    const refreshed = await client.getJwks();
+
+    expect(refreshed.keys[0].kid).toBe('new-key');
+    expect(oldJwksCalls).toBe(1);
+    expect(newJwksCalls).toBe(1);
+  });
+
+  test('verification binds JWKS and algorithms to one discovery snapshot', async () => {
+    const key = await generateRs256KeyPair('snapshot-key');
+    let metadata = {
+      issuer: 'https://issuer.example',
+      authorization_endpoint: 'https://issuer.example/authorize',
+      token_endpoint: 'https://issuer.example/token',
+      jwks_uri: 'https://issuer.example/jwks-old',
+      response_types_supported: ['code'],
+      subject_types_supported: ['public'],
+      id_token_signing_alg_values_supported: ['RS256'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'],
+    };
+    let phase = 'warm';
+    let boundaryClockCalls = 0;
+    const requests = [];
+    const clock = () => {
+      if (phase === 'warm') return 0;
+      boundaryClockCalls += 1;
+      return boundaryClockCalls === 1 ? OIDC_DISCOVERY_TTL_MS - 1 : OIDC_DISCOVERY_TTL_MS;
+    };
+    const client = createOidcClient({
+      issuer: metadata.issuer,
+      clientId: 'test-client',
+      production: false,
+      clock,
+      logger: capturingLogger(),
+      fetch: async (url) => {
+        const path = new URL(url).pathname;
+        requests.push(path);
+        if (path === '/.well-known/openid-configuration') return Response.json(metadata);
+        if (path === '/jwks-old' || path === '/jwks-new') return Response.json({ keys: [key.publicJwk] });
+        return new Response('not found', { status: 404 });
+      },
+    });
+
+    await client.discover();
+    await client.getJwks();
+    metadata = {
+      ...metadata,
+      jwks_uri: 'https://issuer.example/jwks-new',
+      id_token_signing_alg_values_supported: ['ES256'],
+    };
+    phase = 'boundary';
+    const nowSeconds = Math.floor(OIDC_DISCOVERY_TTL_MS / 1000);
+    const token = await signJwt(key.privateKey, { alg: 'RS256', typ: 'JWT', kid: key.publicJwk.kid }, {
+      iss: metadata.issuer,
+      sub: 'subject',
+      aud: 'test-client',
+      exp: nowSeconds + 300,
+      iat: nowSeconds,
+      nonce: 'nonce',
+    });
+
+    const payload = await client.verify(token, { nonce: 'nonce' });
+    expect(payload.sub).toBe('subject');
+    expect(requests).not.toContain('/jwks-new');
+  });
+
+  test('present falsey typ header values are rejected', async () => {
+    for (const typ of [false, null, 0, '']) {
+      const { api, issuer } = await createHarness();
+      issuer.mutateNextIdToken(({ header, payload }) => ({ header: { ...header, typ }, payload }));
       const result = await completeLogin(api, issuer);
       expect(result.callback.status).toBe(400);
       expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);

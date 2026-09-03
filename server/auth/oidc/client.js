@@ -226,19 +226,23 @@ export function createOidcClient(options) {
     }
   }
 
-  async function getJwks({ force = false } = {}) {
-    if (!force) {
-      const cached = cache.get('jwks');
-      if (cached) return cached;
-    }
+  function jwksCacheKey(jwksUri) {
+    return `jwks:${jwksUri}`;
+  }
+
+  async function getJwksForMetadata(metadata, { force = false } = {}) {
+    const cacheKey = jwksCacheKey(metadata.jwks_uri);
     try {
-      const metadata = await discover();
+      if (!force) {
+        const cached = cache.get(cacheKey);
+        if (cached) return cached;
+      }
       const document = await requestJson(metadata.jwks_uri, { method: 'GET', urlType: 'jwks' });
       const jwks = validateJwks(document);
-      cache.set('jwks', jwks, OIDC_JWKS_TTL_MS);
+      cache.set(cacheKey, jwks, OIDC_JWKS_TTL_MS);
       return jwks;
     } catch (error) {
-      cache.invalidate('jwks');
+      cache.invalidate(cacheKey);
       logOidc(logger, 'error', 'jwks_failed', {
         issuer,
         reason: error.reason || 'network_error',
@@ -247,6 +251,11 @@ export function createOidcClient(options) {
       });
       throw error;
     }
+  }
+
+  async function getJwks({ force = false } = {}) {
+    const metadata = await discover();
+    return getJwksForMetadata(metadata, { force });
   }
 
   async function exchangeAuthorizationCode({ code, redirectUri, codeVerifier }) {
@@ -287,20 +296,22 @@ export function createOidcClient(options) {
   }
 
   async function verify(idToken, { nonce }) {
-    const metadata = await discover();
-    let jwks = await getJwks();
-    const verifyOptions = { jwks, issuer, audience: clientId, nonce, clock, allowedAlgs: metadata.idTokenAlgs };
+    let metadata = await discover();
+    let jwks = await getJwksForMetadata(metadata);
+    let verifyOptions = { jwks, issuer, audience: clientId, nonce, clock, allowedAlgs: metadata.idTokenAlgs };
     let result = await verifyIdToken(idToken, verifyOptions);
     if (result.reason === 'unknown_kid') {
       logOidc(logger, 'warn', 'jwks_key_rotation', { issuer, reason: 'unknown_kid', action: 'refresh' });
-      cache.invalidate('jwks');
+      metadata = await discover();
+      cache.invalidate(jwksCacheKey(metadata.jwks_uri));
       try {
-        jwks = await getJwks({ force: true });
+        jwks = await getJwksForMetadata(metadata, { force: true });
       } catch (error) {
         logOidc(logger, 'error', 'jwks_key_rotation_failed', { issuer, reason: error.reason || 'network_error' });
         throw error;
       }
-      result = await verifyIdToken(idToken, { ...verifyOptions, jwks });
+      verifyOptions = { ...verifyOptions, jwks, allowedAlgs: metadata.idTokenAlgs };
+      result = await verifyIdToken(idToken, verifyOptions);
       if (result.reason === 'unknown_kid') {
         logOidc(logger, 'error', 'jwks_key_rotation_failed', { issuer, reason: 'unknown_kid' });
         throw fail('unknown_kid');

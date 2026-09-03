@@ -166,7 +166,7 @@ export function validateIdTokenClaims(payload, { issuer, audience, nonce, clock,
 export async function verifyIdToken(token, { jwks, issuer, audience, nonce, clock, allowedAlgs = OIDC_SUPPORTED_ALGS }) {
   const parsed = parseJwt(token);
   if (!parsed) return { ok: false, reason: 'malformed_id_token' };
-  if (parsed.header.typ && parsed.header.typ !== 'JWT') return { ok: false, reason: 'invalid_typ' };
+  if (parsed.header.typ !== undefined && parsed.header.typ !== 'JWT') return { ok: false, reason: 'invalid_typ' };
   if (!allowedAlgs.includes(parsed.header.alg) || parsed.header.alg === 'none') {
     return { ok: false, reason: 'unsupported_algorithm' };
   }
