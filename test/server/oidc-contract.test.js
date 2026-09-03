@@ -13,7 +13,7 @@ import { formEncode } from '../../server/auth/oidc/client.js';
 import { loadOidcConfig } from '../../server/auth/oidc/config.js';
 import { OIDC_ID_TOKEN_TTL_SECONDS, OIDC_MAX_RESPONSE_BYTES } from '../../server/auth/oidc/constants.js';
 import { createServer } from '../../server/server.js';
-import { createFakeOidcIssuer } from './fake-oidc-issuer.js';
+import { createFakeOidcIssuer, generateEs256KeyPair, signJwt } from './fake-oidc-issuer.js';
 
 const NOW = 1_700_000_000_000;
 const databases = [];
@@ -784,10 +784,47 @@ describe('OIDC discovery, JWKS, and key rotation failures', () => {
       (jwk) => ({ ...jwk, key_ops: ['encrypt'] }),
       (jwk) => ({ ...jwk, key_ops: ['sign'] }),
       (jwk) => ({ ...jwk, use: 'sig', key_ops: ['verify', 'encrypt'] }),
+      (jwk) => ({ ...jwk, key_ops: ['verify', 'verify'] }),
     ];
     for (const mutate of restrictions) {
       const { api, issuer } = await createHarness();
       issuer.mutatePublicJwk(mutate);
+      const result = await completeLogin(api, issuer);
+      expect(result.callback.status).toBe(400);
+      expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+    }
+  });
+
+  test('ID token alg must match the advertised discovery intersection', async () => {
+    const es256 = await generateEs256KeyPair('es-key');
+    const rs256Advertised = await createHarness();
+    rs256Advertised.issuer.setMetadata({
+      ...rs256Advertised.issuer.metadata,
+      id_token_signing_alg_values_supported: ['RS256'],
+    });
+    rs256Advertised.issuer.addPublicJwk(es256.publicJwk);
+    rs256Advertised.issuer.mutateNextIdToken(async ({ header, payload }) => ({
+      idToken: await signJwt(es256.privateKey, { ...header, alg: 'ES256', kid: es256.publicJwk.kid }, payload),
+    }));
+    const esToken = await completeLogin(rs256Advertised.api, rs256Advertised.issuer);
+    expect(esToken.callback.status).toBe(400);
+    expect(rs256Advertised.api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+
+    const es256Advertised = await createHarness();
+    es256Advertised.issuer.setMetadata({
+      ...es256Advertised.issuer.metadata,
+      id_token_signing_alg_values_supported: ['ES256'],
+    });
+    es256Advertised.issuer.addPublicJwk(es256.publicJwk);
+    const rsToken = await completeLogin(es256Advertised.api, es256Advertised.issuer);
+    expect(rsToken.callback.status).toBe(400);
+    expect(es256Advertised.api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);
+  });
+
+  test('malformed present kid is rejected rather than treated as absent', async () => {
+    for (const kid of [42, null, '']) {
+      const { api, issuer } = await createHarness();
+      issuer.mutateNextIdToken(({ header, payload }) => ({ header: { ...header, kid }, payload }));
       const result = await completeLogin(api, issuer);
       expect(result.callback.status).toBe(400);
       expect(api.database.query('SELECT count(*) count FROM sessions').get().count).toBe(0);

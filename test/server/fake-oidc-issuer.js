@@ -20,13 +20,31 @@ export async function generateRs256KeyPair(kid = 'test-key') {
   };
 }
 
+export async function generateEs256KeyPair(kid = 'es-key') {
+  const pair = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify'],
+  );
+  const publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  return {
+    privateKey: pair.privateKey,
+    publicJwk: { ...publicJwk, kid, use: 'sig', alg: 'ES256' },
+  };
+}
+
+function signAlgorithm(alg) {
+  if (alg === 'ES256') return { name: 'ECDSA', hash: 'SHA-256' };
+  return { name: 'RSASSA-PKCS1-v1_5' };
+}
+
 export async function signJwt(privateKey, header, payload) {
   return signJwtBytes(privateKey, header, encoder.encode(JSON.stringify(payload)));
 }
 
 export async function signJwtBytes(privateKey, header, payloadBytes) {
   const signingInput = `${Buffer.from(JSON.stringify(header)).toString('base64url')}.${Buffer.from(payloadBytes).toString('base64url')}`;
-  const signature = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, privateKey, encoder.encode(signingInput));
+  const signature = await crypto.subtle.sign(signAlgorithm(header.alg), privateKey, encoder.encode(signingInput));
   return `${signingInput}.${Buffer.from(signature).toString('base64url')}`;
 }
 
@@ -78,6 +96,7 @@ export async function createFakeOidcIssuer(options = {}) {
   const endpointQuery = options.endpointQuery ? `?${options.endpointQuery.replace(/^\?/, '')}` : '';
   let signing = options.keys || await generateRs256KeyPair('test-key');
   const retiredKeys = [];
+  const extraKeys = [];
   const codes = new Map();
   let nextAuthorizeError = null;
   let nextTokenMutator = null;
@@ -113,6 +132,7 @@ export async function createFakeOidcIssuer(options = {}) {
       const keys = [];
       if (publishSigningKey) keys.push(signing.publicJwk);
       keys.push(...retiredKeys.map((key) => key.publicJwk));
+      keys.push(...extraKeys);
       return Response.json({ keys });
     }
 
@@ -224,6 +244,9 @@ export async function createFakeOidcIssuer(options = {}) {
     },
     mutatePublicJwk(mutator) {
       signing.publicJwk = mutator({ ...signing.publicJwk });
+    },
+    addPublicJwk(jwk) {
+      extraKeys.push(jwk);
     },
     async rotateKeys(next) {
       retiredKeys.push(signing);

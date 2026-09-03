@@ -182,7 +182,8 @@ export function createOidcClient(options) {
     if (!responseTypes.includes('code')) throw fail('invalid_metadata', { detail: 'response_types_supported' });
     requireStringArray(document.subject_types_supported, 'subject_types_supported');
     const algs = requireStringArray(document.id_token_signing_alg_values_supported, 'id_token_signing_alg_values_supported');
-    if (!algs.some((alg) => OIDC_SUPPORTED_ALGS.includes(alg))) throw fail('unsupported_algorithm');
+    const idTokenAlgs = Object.freeze(OIDC_SUPPORTED_ALGS.filter((alg) => algs.includes(alg)));
+    if (idTokenAlgs.length === 0) throw fail('unsupported_algorithm');
     const methods = document.code_challenge_methods_supported;
     if (methods !== undefined && (!isNonEmptyStringArray(methods) || !methods.includes('S256'))) throw fail('missing_s256');
     const tokenAuthMethod = selectTokenAuthMethod(document.token_endpoint_auth_methods_supported, clientSecret);
@@ -192,6 +193,7 @@ export function createOidcClient(options) {
       token_endpoint: token.href,
       jwks_uri: jwks.href,
       tokenAuthMethod,
+      idTokenAlgs,
     });
   }
 
@@ -285,8 +287,10 @@ export function createOidcClient(options) {
   }
 
   async function verify(idToken, { nonce }) {
+    const metadata = await discover();
     let jwks = await getJwks();
-    let result = await verifyIdToken(idToken, { jwks, issuer, audience: clientId, nonce, clock });
+    const verifyOptions = { jwks, issuer, audience: clientId, nonce, clock, allowedAlgs: metadata.idTokenAlgs };
+    let result = await verifyIdToken(idToken, verifyOptions);
     if (result.reason === 'unknown_kid') {
       logOidc(logger, 'warn', 'jwks_key_rotation', { issuer, reason: 'unknown_kid', action: 'refresh' });
       cache.invalidate('jwks');
@@ -296,7 +300,7 @@ export function createOidcClient(options) {
         logOidc(logger, 'error', 'jwks_key_rotation_failed', { issuer, reason: error.reason || 'network_error' });
         throw error;
       }
-      result = await verifyIdToken(idToken, { jwks, issuer, audience: clientId, nonce, clock });
+      result = await verifyIdToken(idToken, { ...verifyOptions, jwks });
       if (result.reason === 'unknown_kid') {
         logOidc(logger, 'error', 'jwks_key_rotation_failed', { issuer, reason: 'unknown_kid' });
         throw fail('unknown_kid');

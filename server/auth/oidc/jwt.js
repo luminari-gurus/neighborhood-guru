@@ -57,7 +57,7 @@ function jwkAllowsVerify(jwk, alg) {
   const hasUse = jwk.use !== undefined;
   const hasOps = jwk.key_ops !== undefined;
   if (hasUse && jwk.use !== 'sig' && jwk.use !== 'enc') return false;
-  if (hasOps && !isNonEmptyStringArray(jwk.key_ops)) return false;
+  if (hasOps && (!isNonEmptyStringArray(jwk.key_ops) || new Set(jwk.key_ops).size !== jwk.key_ops.length)) return false;
   if (hasUse && hasOps) {
     const allowed = jwk.use === 'sig' ? SIG_KEY_OPS : jwk.use === 'enc' ? ENC_KEY_OPS : null;
     if (!allowed || jwk.key_ops.some((op) => !allowed.has(op))) return false;
@@ -103,17 +103,20 @@ export function parseJwt(token) {
   return { header, payload, signature, signingInput: encoder.encode(`${parts[0]}.${parts[1]}`) };
 }
 
-export function selectJwk(jwks, header) {
+export function selectJwk(jwks, header, allowedAlgs = OIDC_SUPPORTED_ALGS) {
   const keys = Array.isArray(jwks?.keys) ? jwks.keys : [];
   const alg = header?.alg;
-  if (!OIDC_SUPPORTED_ALGS.includes(alg)) return { key: null, unknownKid: false };
+  if (!allowedAlgs.includes(alg)) return { key: null, unknownKid: false };
   const matching = keys.filter((key) => {
     if (alg === 'RS256') return key.kty === 'RSA';
     if (alg === 'ES256') return key.kty === 'EC' && key.crv === 'P-256';
     return false;
   });
   let selected = null;
-  if (typeof header.kid === 'string' && header.kid) {
+  if (header.kid !== undefined) {
+    if (typeof header.kid !== 'string' || header.kid.length === 0) {
+      return { key: null, unknownKid: false, reason: 'malformed_kid' };
+    }
     selected = matching.find((entry) => entry.kid === header.kid) || null;
     if (!selected) return { key: null, unknownKid: true };
   } else if (matching.length === 1) {
@@ -160,19 +163,22 @@ export function validateIdTokenClaims(payload, { issuer, audience, nonce, clock,
   return null;
 }
 
-export async function verifyIdToken(token, { jwks, issuer, audience, nonce, clock }) {
+export async function verifyIdToken(token, { jwks, issuer, audience, nonce, clock, allowedAlgs = OIDC_SUPPORTED_ALGS }) {
   const parsed = parseJwt(token);
   if (!parsed) return { ok: false, reason: 'malformed_id_token' };
   if (parsed.header.typ && parsed.header.typ !== 'JWT') return { ok: false, reason: 'invalid_typ' };
-  if (!OIDC_SUPPORTED_ALGS.includes(parsed.header.alg) || parsed.header.alg === 'none') {
+  if (!allowedAlgs.includes(parsed.header.alg) || parsed.header.alg === 'none') {
     return { ok: false, reason: 'unsupported_algorithm' };
   }
   if (parsed.header.crit !== undefined) {
     if (!isNonEmptyStringArray(parsed.header.crit)) return { ok: false, reason: 'malformed_crit' };
     return { ok: false, reason: 'unsupported_crit' };
   }
-  const selected = selectJwk(jwks, parsed.header);
-  if (!selected.key) return { ok: false, reason: selected.unknownKid ? 'unknown_kid' : 'invalid_signature' };
+  const selected = selectJwk(jwks, parsed.header, allowedAlgs);
+  if (!selected.key) {
+    if (selected.reason === 'malformed_kid') return { ok: false, reason: 'malformed_kid' };
+    return { ok: false, reason: selected.unknownKid ? 'unknown_kid' : 'invalid_signature' };
+  }
   const valid = await verifyJwtSignature(parsed, selected.key);
   if (!valid) return { ok: false, reason: 'invalid_signature' };
   const claimError = validateIdTokenClaims(parsed.payload, { issuer, audience, nonce, clock });
