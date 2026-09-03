@@ -251,7 +251,7 @@ export function createAuthBackend(options = {}) {
 
     const claimedAt = clock();
     try {
-      const claimed = database.transaction(() => database.run('UPDATE login_transactions SET consumed_at = ? WHERE state_hash = ? AND provider_id = ? AND consumed_at IS NULL AND expires_at > ?', [claimedAt, stateHash, providerId, claimedAt])).immediate();
+      const claimed = database.transaction(() => database.run('UPDATE login_transactions SET consumed_at = ?, adapter_context = NULL WHERE state_hash = ? AND provider_id = ? AND consumed_at IS NULL AND expires_at > ?', [claimedAt, stateHash, providerId, claimedAt])).immediate();
       if (claimed.changes !== 1) return fail(400, 'invalid_callback_state');
     } catch { return fail(500, 'auth_internal_error'); }
 
@@ -320,7 +320,7 @@ export function createAuthBackend(options = {}) {
         const state = token(randomBytes, SESSION_TOKEN_BYTES);
         let authorization;
         try {
-          authorization = await provider.createAuthorizationUrl({ state, returnPath });
+          authorization = await provider.createAuthorizationUrl({ state, returnPath, url });
         } catch {
           return fail(502, 'provider_login_failed');
         }

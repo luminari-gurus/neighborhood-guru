@@ -1,0 +1,17 @@
+export const OIDC_DEFAULT_PROVIDER_ID = 'oidc';
+export const OIDC_DEFAULT_DISPLAY_NAME = 'Sign in';
+export const OIDC_DEFAULT_SCOPES = 'openid profile email';
+export const OIDC_DEFAULT_REDIRECT_PATH = '/api/auth/callback/oidc';
+export const OIDC_DISCOVERY_TTL_MS = 10 * 60 * 1000;
+export const OIDC_JWKS_TTL_MS = 10 * 60 * 1000;
+export const OIDC_CACHE_MAX_ENTRIES = 8;
+export const OIDC_FETCH_TIMEOUT_MS = 5_000;
+export const OIDC_MAX_RESPONSE_BYTES = 65_536;
+export const OIDC_MAX_ID_TOKEN_LENGTH = 16_384;
+export const OIDC_MAX_AUTHORIZATION_CODE_LENGTH = 2_048;
+export const OIDC_CLOCK_SKEW_SECONDS = 60;
+export const OIDC_SUPPORTED_ALGS = Object.freeze(['RS256', 'ES256']);
+export const OIDC_PKCE_BYTES = 32;
+export const OIDC_NONCE_BYTES = 32;
+export const OIDC_MAX_KEYS = 16;
+export const OIDC_ID_TOKEN_TTL_SECONDS = 5 * 60;
