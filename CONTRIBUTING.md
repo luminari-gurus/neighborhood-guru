@@ -38,6 +38,12 @@ Create a topic branch for your work:
 
 ---
 
+## 📐 Architecture Decisions
+
+Architecture-track work (storage, sync, auth/data-plane boundaries, and similar) should start as an Architecture Decision Record under [`docs/adr/`](docs/adr/README.md) before implementation PRs. Use status **Proposed** until maintainers accept the decision.
+
+---
+
 ## 🎨 Design System & Code Style Guidelines
 
 - **Vanilla Stack**: Use HTML5, Vanilla JavaScript (ES Modules), and Vanilla CSS. Do not add heavy utility frameworks like TailwindCSS unless explicitly discussed.
@@ -71,6 +77,7 @@ Before opening a Pull Request, verify your changes compile cleanly without error
    - What changes were made.
    - Why the change is needed.
    - Screenshots or video recordings demonstrating UI changes (if applicable).
+   - For ADRs, link the related issue (prefer `Addresses #N` until implementation meets the issue's acceptance criteria).
 
 ---
 
