@@ -3,6 +3,7 @@
    ========================================================================== */
 
 import { StorageService } from './js/storage.js';
+import { bindNeighborhoodWorkingCopy } from './js/neighborhood-working-copy.js';
 import { MapboxService } from './js/mapbox-service.js';
 import { UIController } from './js/ui.js';
 import { WeatherService } from './js/weather-service.js';
@@ -23,6 +24,8 @@ class NeighborhoodGuruApp {
     this.unsubscribeAuth = this.auth.subscribe((state) => {
       this.authState = state;
     });
+    this.unsubscribeWorkingCopy = null;
+    this.viewReady = false;
 
     this.homeAddress = null;
     this.savedPlaces = [];
@@ -35,27 +38,27 @@ class NeighborhoodGuruApp {
     // Anonymous auth is provider-neutral and does not gate local data.
     await this.auth.initialize();
 
+    // Switch the local working copy with the session before first read.
+    // Login never uploads; AUTHENTICATING does not flash another namespace.
+    this.unsubscribeWorkingCopy = bindNeighborhoodWorkingCopy(this.auth, this.storage, {
+      onOwnerChange: () => {
+        if (this.viewReady) this.syncNeighborhoodViewFromStorage();
+      },
+    });
+
     // 1. Initialize UI Controller & cache elements
     this.ui.init();
+    this.viewReady = true;
 
     // Wire up JamBase API fallback notification (shows toast when API fails)
     JamBaseService.setApiFallbackCallback((reason) => {
       this.ui.showJambaseApiFallbackToast(reason);
     });
 
-    // 2. Load stored data
-    this.homeAddress = this.storage.getHomeAddress();
-    this.savedPlaces = this.storage.getSavedPlaces();
+    // 2. Load stored data for the active namespace
+    this.syncNeighborhoodViewFromStorage();
     const token = this.storage.getMapboxToken();
     const preferredStyle = this.storage.getPreferredStyle();
-
-    // 3. Update UI Header & Sidebar state
-    this.ui.updateHomeHeaderStatus(this.homeAddress);
-    this.ui.renderPlacesList(
-      this.savedPlaces,
-      (place) => this.onPlaceSelected(place),
-      (place) => this.ui.openLocationModal(place)
-    );
 
     // Update style switcher button active states
     const styleBtn = document.querySelector(`.style-btn[data-style="${preferredStyle}"]`);
@@ -70,9 +73,6 @@ class NeighborhoodGuruApp {
     // 5. Check Mapbox Key Status
     const hasKey = Boolean(token && token.trim().startsWith('pk.'));
     this.ui.updateKeyWarningState(hasKey);
-
-    // 6. Fetch & Display Live Weather
-    this.fetchAndDisplayWeather();
 
     // 6. Safely initialize Mapbox Engine
     if (hasKey) {
@@ -106,6 +106,38 @@ class NeighborhoodGuruApp {
       }, 300);
       this.ui.showToast('Mapbox Access Token required. Provide a key to enable map features!', 'error');
     }
+  }
+
+  /**
+   * Reload home / places from the current namespace and refresh UI.
+   * Used after sign-out and account switch; does not copy between namespaces.
+   */
+  syncNeighborhoodViewFromStorage() {
+    this.homeAddress = this.storage.getHomeAddress();
+    this.savedPlaces = this.storage.getSavedPlaces();
+
+    if (!this.ui?.elements || Object.keys(this.ui.elements).length === 0) return;
+
+    this.ui.updateHomeHeaderStatus(this.homeAddress);
+    this.ui.renderPlacesList(
+      this.savedPlaces,
+      (place) => this.onPlaceSelected(place),
+      (place) => this.ui.openLocationModal(place)
+    );
+
+    if (this.mapboxService.map) {
+      this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
+        this.ui.openLocationModal(place);
+      });
+      if (this.homeAddress) {
+        this.mapboxService.renderHomeMarker(this.homeAddress);
+      } else if (this.mapboxService.homeMarker) {
+        this.mapboxService.homeMarker.remove();
+        this.mapboxService.homeMarker = null;
+      }
+    }
+
+    this.fetchAndDisplayWeather();
   }
 
   bindEvents() {

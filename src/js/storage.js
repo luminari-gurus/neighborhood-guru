@@ -2,18 +2,34 @@
    STORAGE SERVICE - LOCALSTORAGE MANAGEMENT & PERSISTENCE
    ========================================================================== */
 
-const STORAGE_KEYS = {
+export const ANONYMOUS_OWNER_ID = 'anonymous';
+
+export const DEVICE_STORAGE_KEYS = Object.freeze({
   MAPBOX_TOKEN: 'neighborhood_guru_mapbox_token',
   JAMBASE_TOKEN: 'neighborhood_guru_jambase_token',
-  HOME_ADDRESS: 'neighborhood_guru_home_address',
-  SAVED_PLACES: 'neighborhood_guru_saved_places',
   MAP_STYLE: 'neighborhood_guru_map_style',
-};
+});
+
+export const WORKING_COPY_KEYS = Object.freeze({
+  HOME_ADDRESS: 'home_address',
+  SAVED_PLACES: 'saved_places',
+  SYNC_CONSENT: 'sync_consent',
+  DIRTY: 'dirty',
+  LAST_ETAG: 'last_etag',
+});
+
+export const LEGACY_WORKING_COPY_KEYS = Object.freeze({
+  [WORKING_COPY_KEYS.HOME_ADDRESS]: 'neighborhood_guru_home_address',
+  [WORKING_COPY_KEYS.SAVED_PLACES]: 'neighborhood_guru_saved_places',
+});
+
+const STORAGE_KEYS = DEVICE_STORAGE_KEYS;
 
 // Default Sample Neighborhood Data if storage is empty
 const DEMO_PLACES = [
   {
     id: 'demo-1',
+    source: 'demo',
     name: 'Oak Street Bakery & Cafe',
     category: 'favorite',
     people: ['Chef Elena'],
@@ -33,6 +49,7 @@ const DEMO_PLACES = [
   },
   {
     id: 'demo-2',
+    source: 'demo',
     name: 'The Millers (Neighbors)',
     category: 'neighbor',
     people: ['Bob Miller', 'Karen Miller'],
@@ -62,6 +79,31 @@ const DAY_MAP = {
   friday: 5,
   saturday: 6,
 };
+
+export function normalizeOwnerId(ownerId) {
+  if (ownerId == null) return ANONYMOUS_OWNER_ID;
+  if (typeof ownerId !== 'string') {
+    throw new TypeError('Owner id must be a string or null');
+  }
+  const trimmed = ownerId.trim();
+  return trimmed.length === 0 ? ANONYMOUS_OWNER_ID : trimmed;
+}
+
+export function workingCopyKey(ownerId, suffix) {
+  return `neighborhood_guru:${normalizeOwnerId(ownerId)}:${suffix}`;
+}
+
+export function isDemoPlace(place) {
+  if (!place || typeof place !== 'object') return false;
+  if (place.source === 'demo') return true;
+  const id = String(place.id || '');
+  return id === 'demo-1' || id === 'demo-2';
+}
+
+export function isUserAuthoredWorkingCopy({ homeAddress = null, savedPlaces = [] } = {}) {
+  if (homeAddress) return true;
+  return (Array.isArray(savedPlaces) ? savedPlaces : []).some((place) => !isDemoPlace(place));
+}
 
 export function isEventHappeningToday(event) {
   if (!event || !event.day) return false;
@@ -122,69 +164,125 @@ function isModernPlace(place) {
   );
 }
 
+function clonePlaces(places) {
+  return JSON.parse(JSON.stringify(places));
+}
+
+function readItem(key) {
+  return localStorage.getItem(key);
+}
+
+function writeItem(key, value) {
+  localStorage.setItem(key, value);
+}
+
+function removeItem(key) {
+  localStorage.removeItem(key);
+}
+
+/**
+ * Move unprefixed working-copy keys into the active namespace once.
+ * Local only — never an upload. Does not overwrite namespaced keys that
+ * already exist. Target is the current owner (anonymous, or the restored
+ * session's user.id when that is the sole identity using the old keys).
+ */
+function migrateLegacyWorkingCopy(ownerId) {
+  const owner = normalizeOwnerId(ownerId);
+  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+    const legacy = readItem(legacyKey);
+    if (legacy == null) continue;
+    const dest = workingCopyKey(owner, suffix);
+    if (readItem(dest) == null) {
+      writeItem(dest, legacy);
+    }
+    removeItem(legacyKey);
+  }
+}
+
 export const StorageService = {
+  _ownerId: ANONYMOUS_OWNER_ID,
+
+  getOwnerId() {
+    return this._ownerId;
+  },
+
   /**
-   * Mapbox Access Token
+   * Switch the working copy. Does not copy values between namespaces.
+   * `null` selects the anonymous namespace.
+   */
+  setOwner(ownerId) {
+    this._ownerId = normalizeOwnerId(ownerId);
+    migrateLegacyWorkingCopy(this._ownerId);
+    return this._ownerId;
+  },
+
+  workingCopyKey(suffix) {
+    return workingCopyKey(this._ownerId, suffix);
+  },
+
+  /**
+   * Mapbox Access Token (device-level — not namespaced)
    */
   getMapboxToken() {
-    return localStorage.getItem(STORAGE_KEYS.MAPBOX_TOKEN) || import.meta.env.VITE_MAPBOX_TOKEN || '';
+    return readItem(STORAGE_KEYS.MAPBOX_TOKEN) || import.meta.env.VITE_MAPBOX_TOKEN || '';
   },
 
   setMapboxToken(token) {
-    localStorage.setItem(STORAGE_KEYS.MAPBOX_TOKEN, token.trim());
+    writeItem(STORAGE_KEYS.MAPBOX_TOKEN, token.trim());
   },
 
   /**
-   * JamBase API Key / Token
+   * JamBase API Key / Token (device-level — not namespaced)
    */
   getJambaseToken() {
-    return localStorage.getItem(STORAGE_KEYS.JAMBASE_TOKEN) || import.meta.env.VITE_JAMBASE_TOKEN || '';
+    return readItem(STORAGE_KEYS.JAMBASE_TOKEN) || import.meta.env.VITE_JAMBASE_TOKEN || '';
   },
 
   setJambaseToken(token) {
-    localStorage.setItem(STORAGE_KEYS.JAMBASE_TOKEN, token.trim());
+    writeItem(STORAGE_KEYS.JAMBASE_TOKEN, token.trim());
   },
 
   /**
    * Home Address Object { name, lat, lng, formattedAddress }
    */
   getHomeAddress() {
-    const raw = localStorage.getItem(STORAGE_KEYS.HOME_ADDRESS);
+    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS));
     return raw ? JSON.parse(raw) : null;
   },
 
   setHomeAddress(addressObj) {
-    localStorage.setItem(STORAGE_KEYS.HOME_ADDRESS, JSON.stringify(addressObj));
+    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS), JSON.stringify(addressObj));
   },
 
   clearHomeAddress() {
-    localStorage.removeItem(STORAGE_KEYS.HOME_ADDRESS);
+    removeItem(this.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS));
   },
 
   /**
    * Saved Places Array
    */
   getSavedPlaces() {
-    const raw = localStorage.getItem(STORAGE_KEYS.SAVED_PLACES);
+    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES));
     if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(DEMO_PLACES));
-      return DEMO_PLACES;
+      const seeded = clonePlaces(DEMO_PLACES);
+      writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(seeded));
+      return seeded;
     }
     try {
       const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return DEMO_PLACES;
+      if (!Array.isArray(parsed)) return clonePlaces(DEMO_PLACES);
       
       const validModern = parsed.filter(isModernPlace);
       
       // Purge any legacy items from localStorage
       if (validModern.length !== parsed.length) {
-        const finalPlaces = validModern.length > 0 ? validModern : DEMO_PLACES;
-        localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(finalPlaces));
+        const finalPlaces = validModern.length > 0 ? validModern : clonePlaces(DEMO_PLACES);
+        writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(finalPlaces));
         return finalPlaces;
       }
       return validModern;
     } catch (e) {
-      return DEMO_PLACES;
+      return clonePlaces(DEMO_PLACES);
     }
   },
 
@@ -204,29 +302,68 @@ export const StorageService = {
       });
     }
 
-    localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(places));
+    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(places));
     return places;
   },
 
   deletePlace(id) {
     const places = this.getSavedPlaces().filter(p => p.id !== id);
-    localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(places));
+    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(places));
     return places;
   },
 
   /**
-   * Map Style Preference
+   * Per-namespace sync metadata. Login / session restore must not read or
+   * write a remote NeighborhoodStore; these keys stay local.
    */
-  getPreferredStyle() {
-    return localStorage.getItem(STORAGE_KEYS.MAP_STYLE) || 'streets';
+  getSyncConsent() {
+    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.SYNC_CONSENT));
+    if (raw == null) return false;
+    try {
+      return JSON.parse(raw) === true;
+    } catch {
+      return raw === 'true';
+    }
   },
 
-  setPreferredStyle(styleName) {
-    localStorage.setItem(STORAGE_KEYS.MAP_STYLE, styleName);
+  setSyncConsent(enabled) {
+    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SYNC_CONSENT), JSON.stringify(Boolean(enabled)));
+  },
+
+  isDirty() {
+    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.DIRTY));
+    return raw === '1' || raw === 'true';
+  },
+
+  setDirty(dirty) {
+    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.DIRTY), dirty ? '1' : '0');
+  },
+
+  getLastEtag() {
+    return readItem(this.workingCopyKey(WORKING_COPY_KEYS.LAST_ETAG));
+  },
+
+  setLastEtag(etag) {
+    if (etag == null || etag === '') {
+      removeItem(this.workingCopyKey(WORKING_COPY_KEYS.LAST_ETAG));
+      return;
+    }
+    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.LAST_ETAG), String(etag));
   },
 
   /**
-   * Backup Export & Import
+   * Map Style Preference (device-level — not namespaced)
+   */
+  getPreferredStyle() {
+    return readItem(STORAGE_KEYS.MAP_STYLE) || 'streets';
+  },
+
+  setPreferredStyle(styleName) {
+    writeItem(STORAGE_KEYS.MAP_STYLE, styleName);
+  },
+
+  /**
+   * Backup Export & Import — current namespace only
    */
   exportDataJSON() {
     const backup = {
@@ -243,7 +380,7 @@ export const StorageService = {
       const data = JSON.parse(jsonStr);
       if (data.homeAddress) this.setHomeAddress(data.homeAddress);
       if (Array.isArray(data.savedPlaces)) {
-        localStorage.setItem(STORAGE_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
+        writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(data.savedPlaces));
       }
       return true;
     } catch (e) {
