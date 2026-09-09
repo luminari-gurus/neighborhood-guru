@@ -151,6 +151,8 @@ neighborhood-guru/
 ├── index.html              # Main HTML application markup & modals
 ├── vite.config.js          # Vite build & proxy configuration
 ├── requests.http           # Sample HTTP REST requests for JamBase API testing
+├── docs/
+│   └── adr/                # Architecture Decision Records
 ├── src/
 │   ├── style.css           # Glassmorphism design system & utility classes
 │   ├── main.js             # Main application orchestrator & event handlers
@@ -165,6 +167,8 @@ neighborhood-guru/
 └── README.md
 ```
 
+Design notes live under [docs/](docs/README.md). Architecture Decision Records are listed in [docs/adr/](docs/adr/README.md).
+
 ---
 
 ## 🛡️ Security & Privacy Notice
@@ -172,6 +176,7 @@ neighborhood-guru/
 Neighborhood Guru is built with a **Local-First** privacy architecture:
 - Your saved neighborhood contacts, phone numbers, notes, and addresses remain on your device in browser `localStorage`.
 - API tokens (Mapbox and JamBase) are stored locally in your browser and used strictly for direct client API calls.
+- Optional cross-device neighborhood sync is **not implemented**. Login never uploads places. A proposed opt-in design (pluggable Turso / SQLite / Postgres / local store, separate from the auth database) is recorded in [ADR 0001](docs/adr/0001-opt-in-neighborhood-sync.md).
 
 ---
 
