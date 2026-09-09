@@ -24,7 +24,6 @@ class NeighborhoodGuruApp {
     this.unsubscribeAuth = this.auth.subscribe((state) => {
       this.authState = state;
     });
-    this.unsubscribeWorkingCopy = null;
     this.viewReady = false;
 
     this.homeAddress = null;
@@ -38,9 +37,12 @@ class NeighborhoodGuruApp {
     // Anonymous auth is provider-neutral and does not gate local data.
     await this.auth.initialize();
 
-    // Switch the local working copy with the session before first read.
-    // Login never uploads; AUTHENTICATING does not flash another namespace.
-    this.unsubscribeWorkingCopy = bindNeighborhoodWorkingCopy(this.auth, this.storage, {
+    // Bind after initialize() so restore has already settled (this call does
+    // not observe AUTHENTICATING from loadSession). Later sign-in still goes
+    // through the subscribe path, which ignores AUTHENTICATING so another
+    // namespace is not flashed. Login never uploads. Process-lifetime: this
+    // SPA has no teardown, so the subscription is not stored or disposed.
+    bindNeighborhoodWorkingCopy(this.auth, this.storage, {
       onOwnerChange: () => {
         if (this.viewReady) this.syncNeighborhoodViewFromStorage();
       },

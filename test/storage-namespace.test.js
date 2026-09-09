@@ -82,6 +82,10 @@ function throwingNeighborhoodStore() {
   };
 }
 
+function isNeighborhoodNetworkUrl(url) {
+  return String(url).includes('/api/neighborhood');
+}
+
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -176,6 +180,27 @@ describe('namespaced browser storage', () => {
 
     expect(StorageService.getHomeAddress().name).toBe('Already migrated');
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+  });
+
+  test('reading working-copy keys before setOwner migrates legacy data instead of seeding over it', () => {
+    const home = { name: 'Legacy Home', lat: 37.7, lng: -122.4 };
+    const places = [userPlace({ name: 'Legacy Cafe' })];
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(home));
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify(places));
+
+    const loadedPlaces = StorageService.getSavedPlaces();
+    const loadedHome = StorageService.getHomeAddress();
+
+    expect(loadedHome).toEqual(home);
+    expect(loadedPlaces).toEqual(places);
+    expect(loadedPlaces.some((place) => place.name === 'Legacy Cafe')).toBe(true);
+    expect(loadedPlaces.every(isDemoPlace)).toBe(false);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
+
+    StorageService.setOwner(null);
+    expect(StorageService.getHomeAddress()).toEqual(home);
+    expect(StorageService.getSavedPlaces().map((place) => place.name)).toContain('Legacy Cafe');
   });
 
   test('does not namespace device-level map style, tokens, or JamBase show cache', () => {
@@ -325,6 +350,9 @@ describe('working-copy bind and login I/O', () => {
     globalThis.fetch = async (input, init) => {
       const url = String(input?.url ?? input);
       urls.push(url);
+      if (isNeighborhoodNetworkUrl(url)) {
+        throw new Error(`neighborhood network I/O is forbidden on login: ${url}`);
+      }
       if (url.includes('/api/auth/session')) {
         return jsonResponse({
           user: SESSION_A.user,
@@ -346,17 +374,77 @@ describe('working-copy bind and login I/O', () => {
     expect(state.status).toBe(AUTH_STATUS.AUTHENTICATED);
     expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
     expect(neighborhoodStore.calls).toEqual([]);
-    expect(urls.filter((url) => /neighborhood/i.test(url))).toEqual([]);
+    expect(urls.filter(isNeighborhoodNetworkUrl)).toEqual([]);
     expect(urls.some((url) => url.includes('/api/auth/session'))).toBe(true);
 
     auth.dispose();
   });
 
-  test('sign-in performs zero neighborhood network I/O and does not upload', async () => {
+  test('http sign-in then session restore perform zero neighborhood network I/O', async () => {
+    const urls = [];
+    const assigns = [];
+    const neighborhoodStore = throwingNeighborhoodStore();
+    let sessionBody = null;
+
+    const fetchImpl = async (input, init) => {
+      const url = String(input?.url ?? input);
+      urls.push(url);
+      if (isNeighborhoodNetworkUrl(url)) {
+        throw new Error(`neighborhood network I/O is forbidden on login: ${url}`);
+      }
+      if (url.includes('/api/auth/session')) {
+        return jsonResponse(sessionBody);
+      }
+      throw new Error(`unexpected fetch ${url} ${init?.method || 'GET'}`);
+    };
+    globalThis.fetch = fetchImpl;
+
+    const client = createHttpAuthClient({
+      fetch: fetchImpl,
+      location: {
+        pathname: '/',
+        search: '',
+        hash: '',
+        assign(href) {
+          assigns.push(String(href));
+        },
+      },
+    });
+    const auth = createAuthState(client);
+    bindNeighborhoodWorkingCopy(auth, StorageService, { neighborhoodStore });
+
+    await auth.initialize();
+    expect(auth.getState().status).toBe(AUTH_STATUS.ANONYMOUS);
+
+    await auth.signIn({ providerId: 'oidc' });
+    expect(assigns.some((href) => href.includes('/api/auth/login/oidc'))).toBe(true);
+
+    sessionBody = {
+      user: SESSION_A.user,
+      expiresAt: SESSION_A.expiresAt,
+      csrfToken: 'csrf-token',
+    };
+    await auth.refreshSession();
+
+    expect(auth.getState().status).toBe(AUTH_STATUS.AUTHENTICATED);
+    expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
+    expect(neighborhoodStore.calls).toEqual([]);
+    expect(urls.filter(isNeighborhoodNetworkUrl)).toEqual([]);
+    expect(urls.some((url) => url.includes('/api/auth/session'))).toBe(true);
+    expect(urls.some((url) => url.includes('/api/neighborhood'))).toBe(false);
+
+    auth.dispose();
+  });
+
+  test('sign-in does not flash anonymous data or copy places, and calls no NeighborhoodStore', async () => {
     const urls = [];
     const neighborhoodStore = throwingNeighborhoodStore();
     globalThis.fetch = async (input) => {
-      urls.push(String(input?.url ?? input));
+      const url = String(input?.url ?? input);
+      urls.push(url);
+      if (isNeighborhoodNetworkUrl(url)) {
+        throw new Error(`neighborhood network I/O is forbidden on login: ${url}`);
+      }
       throw new Error('sign-in must not fetch neighborhood data');
     };
 
@@ -386,7 +474,7 @@ describe('working-copy bind and login I/O', () => {
     expect(authenticatingOwners.every((owner) => owner === ANONYMOUS_OWNER_ID)).toBe(true);
     expect(StorageService.getSavedPlaces().some((place) => place.name === 'Stay anonymous')).toBe(false);
     expect(neighborhoodStore.calls).toEqual([]);
-    expect(urls.filter((url) => /neighborhood/i.test(url))).toEqual([]);
+    expect(urls.filter(isNeighborhoodNetworkUrl)).toEqual([]);
     expect(owners).toContain(SESSION_A.user.id);
 
     auth.dispose();

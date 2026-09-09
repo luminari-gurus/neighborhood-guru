@@ -23,8 +23,6 @@ export const LEGACY_WORKING_COPY_KEYS = Object.freeze({
   [WORKING_COPY_KEYS.SAVED_PLACES]: 'neighborhood_guru_saved_places',
 });
 
-const STORAGE_KEYS = DEVICE_STORAGE_KEYS;
-
 // Default Sample Neighborhood Data if storage is empty
 const DEMO_PLACES = [
   {
@@ -185,6 +183,9 @@ function removeItem(key) {
  * Local only — never an upload. Does not overwrite namespaced keys that
  * already exist. Target is the current owner (anonymous, or the restored
  * session's user.id when that is the sole identity using the old keys).
+ *
+ * Invoked from setOwner and from every working-copy read/write so a getter
+ * cannot seed demos into an empty namespaced key before migration runs.
  */
 function migrateLegacyWorkingCopy(ownerId) {
   const owner = normalizeOwnerId(ownerId);
@@ -197,6 +198,21 @@ function migrateLegacyWorkingCopy(ownerId) {
     }
     removeItem(legacyKey);
   }
+}
+
+function readWorkingCopy(ownerId, suffix) {
+  migrateLegacyWorkingCopy(ownerId);
+  return readItem(workingCopyKey(ownerId, suffix));
+}
+
+function writeWorkingCopy(ownerId, suffix, value) {
+  migrateLegacyWorkingCopy(ownerId);
+  writeItem(workingCopyKey(ownerId, suffix), value);
+}
+
+function removeWorkingCopy(ownerId, suffix) {
+  migrateLegacyWorkingCopy(ownerId);
+  removeItem(workingCopyKey(ownerId, suffix));
 }
 
 export const StorageService = {
@@ -224,48 +240,48 @@ export const StorageService = {
    * Mapbox Access Token (device-level — not namespaced)
    */
   getMapboxToken() {
-    return readItem(STORAGE_KEYS.MAPBOX_TOKEN) || import.meta.env.VITE_MAPBOX_TOKEN || '';
+    return readItem(DEVICE_STORAGE_KEYS.MAPBOX_TOKEN) || import.meta.env.VITE_MAPBOX_TOKEN || '';
   },
 
   setMapboxToken(token) {
-    writeItem(STORAGE_KEYS.MAPBOX_TOKEN, token.trim());
+    writeItem(DEVICE_STORAGE_KEYS.MAPBOX_TOKEN, token.trim());
   },
 
   /**
    * JamBase API Key / Token (device-level — not namespaced)
    */
   getJambaseToken() {
-    return readItem(STORAGE_KEYS.JAMBASE_TOKEN) || import.meta.env.VITE_JAMBASE_TOKEN || '';
+    return readItem(DEVICE_STORAGE_KEYS.JAMBASE_TOKEN) || import.meta.env.VITE_JAMBASE_TOKEN || '';
   },
 
   setJambaseToken(token) {
-    writeItem(STORAGE_KEYS.JAMBASE_TOKEN, token.trim());
+    writeItem(DEVICE_STORAGE_KEYS.JAMBASE_TOKEN, token.trim());
   },
 
   /**
    * Home Address Object { name, lat, lng, formattedAddress }
    */
   getHomeAddress() {
-    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS));
+    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
     return raw ? JSON.parse(raw) : null;
   },
 
   setHomeAddress(addressObj) {
-    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS), JSON.stringify(addressObj));
+    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS, JSON.stringify(addressObj));
   },
 
   clearHomeAddress() {
-    removeItem(this.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS));
+    removeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
   },
 
   /**
    * Saved Places Array
    */
   getSavedPlaces() {
-    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES));
+    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
     if (!raw) {
       const seeded = clonePlaces(DEMO_PLACES);
-      writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(seeded));
+      writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
       return seeded;
     }
     try {
@@ -277,7 +293,7 @@ export const StorageService = {
       // Purge any legacy items from localStorage
       if (validModern.length !== parsed.length) {
         const finalPlaces = validModern.length > 0 ? validModern : clonePlaces(DEMO_PLACES);
-        writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(finalPlaces));
+        writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(finalPlaces));
         return finalPlaces;
       }
       return validModern;
@@ -302,13 +318,13 @@ export const StorageService = {
       });
     }
 
-    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(places));
+    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(places));
     return places;
   },
 
   deletePlace(id) {
     const places = this.getSavedPlaces().filter(p => p.id !== id);
-    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(places));
+    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(places));
     return places;
   },
 
@@ -317,7 +333,7 @@ export const StorageService = {
    * write a remote NeighborhoodStore; these keys stay local.
    */
   getSyncConsent() {
-    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.SYNC_CONSENT));
+    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SYNC_CONSENT);
     if (raw == null) return false;
     try {
       return JSON.parse(raw) === true;
@@ -327,39 +343,39 @@ export const StorageService = {
   },
 
   setSyncConsent(enabled) {
-    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SYNC_CONSENT), JSON.stringify(Boolean(enabled)));
+    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SYNC_CONSENT, JSON.stringify(Boolean(enabled)));
   },
 
   isDirty() {
-    const raw = readItem(this.workingCopyKey(WORKING_COPY_KEYS.DIRTY));
+    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.DIRTY);
     return raw === '1' || raw === 'true';
   },
 
   setDirty(dirty) {
-    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.DIRTY), dirty ? '1' : '0');
+    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.DIRTY, dirty ? '1' : '0');
   },
 
   getLastEtag() {
-    return readItem(this.workingCopyKey(WORKING_COPY_KEYS.LAST_ETAG));
+    return readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.LAST_ETAG);
   },
 
   setLastEtag(etag) {
     if (etag == null || etag === '') {
-      removeItem(this.workingCopyKey(WORKING_COPY_KEYS.LAST_ETAG));
+      removeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.LAST_ETAG);
       return;
     }
-    writeItem(this.workingCopyKey(WORKING_COPY_KEYS.LAST_ETAG), String(etag));
+    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.LAST_ETAG, String(etag));
   },
 
   /**
    * Map Style Preference (device-level — not namespaced)
    */
   getPreferredStyle() {
-    return readItem(STORAGE_KEYS.MAP_STYLE) || 'streets';
+    return readItem(DEVICE_STORAGE_KEYS.MAP_STYLE) || 'streets';
   },
 
   setPreferredStyle(styleName) {
-    writeItem(STORAGE_KEYS.MAP_STYLE, styleName);
+    writeItem(DEVICE_STORAGE_KEYS.MAP_STYLE, styleName);
   },
 
   /**
@@ -380,7 +396,7 @@ export const StorageService = {
       const data = JSON.parse(jsonStr);
       if (data.homeAddress) this.setHomeAddress(data.homeAddress);
       if (Array.isArray(data.savedPlaces)) {
-        writeItem(this.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES), JSON.stringify(data.savedPlaces));
+        writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
       }
       return true;
     } catch (e) {

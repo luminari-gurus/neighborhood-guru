@@ -235,7 +235,7 @@ Logical key layout (implementation may prefix with a helper):
 | Mapbox / JamBase tokens | Device-level; **not synced** | Same. Optional later namespacing is a separate hardening issue. |
 | JamBase show cache | Device cache; **not synced** | Same |
 
-Existing unprefixed keys (`neighborhood_guru_home_address`, `neighborhood_guru_saved_places`) migrate **once** into the anonymous namespace so current users are not reset. That migration is local and is not an upload.
+Existing unprefixed keys (`neighborhood_guru_home_address`, `neighborhood_guru_saved_places`) migrate **once** into the anonymous namespace, or into the sole restored `user.id` namespace when that session is already active, so current users are not reset. That migration is local and is not an upload.
 
 **Sign-out** switches the working copy to the anonymous namespace. It must not copy authenticated places into anonymous keys.
 
