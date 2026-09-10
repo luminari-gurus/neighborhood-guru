@@ -40,7 +40,10 @@ export function bindNeighborhoodWorkingCopy(
   const apply = (state) => {
     const nextOwnerId = ownerIdFromAuthState(state);
     if (nextOwnerId === undefined) return currentNamespaceId;
-    storage.setOwner(nextOwnerId);
+
+    // Flip identity first (no storage I/O) so a throwing migrate cannot leave
+    // auth on B while the previous owner's UI is still rendered.
+    storage.setOwner(nextOwnerId, { migrate: false });
     const namespaceId = storage.getNamespaceId?.() ?? storage.getOwnerId();
     if (namespaceId !== currentNamespaceId) {
       const previousNamespaceId = currentNamespaceId;
@@ -51,6 +54,17 @@ export function bindNeighborhoodWorkingCopy(
         // Destination is already selected. A throwing listener must not revert
         // the owner or leave another namespace eligible for writes.
       }
+    }
+
+    try {
+      if (typeof storage.ensureLegacyMigrated === 'function') {
+        storage.ensureLegacyMigrated();
+      } else {
+        storage.setOwner(nextOwnerId);
+      }
+    } catch {
+      // Presentation was already cleared when the owner flipped. A storage
+      // exception must not skip that clear or keep the previous view mounted.
     }
     return namespaceId;
   };

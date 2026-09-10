@@ -19,6 +19,7 @@ import {
   authenticatedWorkingCopyKey,
   isDemoPlace,
   isUserAuthoredWorkingCopy,
+  orphanedWorkingCopyKey,
   workingCopyKey,
 } from '../src/js/storage.js';
 
@@ -102,6 +103,7 @@ describe('namespaced browser storage', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);
     globalThis.localStorage = originalLocalStorage;
   });
@@ -169,7 +171,7 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBeNull();
   });
 
-  test('does not overwrite an existing namespaced working copy and keeps divergent leftover keys', () => {
+  test('does not overwrite an existing namespaced working copy and quarantines divergent leftover keys', () => {
     StorageService.setOwner(ANONYMOUS_OWNER_ID);
     StorageService.setHomeAddress({ name: 'Already migrated', lat: 1, lng: 1 });
     localStorage.setItem(
@@ -180,7 +182,10 @@ describe('namespaced browser storage', () => {
     StorageService.setOwner(ANONYMOUS_OWNER_ID);
 
     expect(StorageService.getHomeAddress().name).toBe('Already migrated');
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe('Stale leftover');
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe(
+      'Stale leftover',
+    );
   });
 
   test('reading working-copy keys before setOwner migrates legacy data instead of seeding over it', () => {
@@ -367,7 +372,8 @@ describe('namespaced browser storage', () => {
     const leftover = [userPlace({ name: 'Older tab cafe' })];
     localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify(leftover));
     StorageService.setOwner(null);
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places))).toEqual(leftover);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES)))).toEqual(leftover);
     expect(StorageService.getSavedPlaces().every(isDemoPlace)).toBe(true);
   });
 
@@ -383,7 +389,8 @@ describe('namespaced browser storage', () => {
     StorageService.setOwner(null);
 
     expect(StorageService.getHomeAddress()).toEqual(destHome);
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address))).toEqual(leftoverHome);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toEqual(leftoverHome);
     expect(StorageService.getSavedPlaces()).toEqual(leftoverPlaces);
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
   });
@@ -401,7 +408,8 @@ describe('namespaced browser storage', () => {
 
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBe('{not-json');
     expect(StorageService.getHomeAddress()).toBeNull();
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address))).toEqual(leftover);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toEqual(leftover);
   });
 
   test('empty destination values are treated as present and divergent leftover is kept', () => {
@@ -417,8 +425,10 @@ describe('namespaced browser storage', () => {
 
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBe('');
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.SAVED_PLACES))).toBe('[]');
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address))).toEqual(leftoverHome);
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places))).toEqual(leftoverPlaces);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toEqual(leftoverHome);
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES)))).toEqual(leftoverPlaces);
   });
 
   test('older-tab write after dest exists is preserved on a later migrate pass', () => {
@@ -434,7 +444,8 @@ describe('namespaced browser storage', () => {
     StorageService.setHomeAddress({ name: 'Current dest', lat: 1, lng: 1 });
 
     expect(StorageService.getHomeAddress().name).toBe('Current dest');
-    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe(
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe(
       'Newer leftover from older tab',
     );
   });
@@ -454,6 +465,110 @@ describe('namespaced browser storage', () => {
     expect(remainingDemo.some((place) => place.id === 'demo-2' && isDemoPlace(place))).toBe(true);
     expect(isUserAuthoredWorkingCopy({ savedPlaces: remainingDemo })).toBe(true);
   });
+
+  test('divergent leftover retained after an anonymous pass is not adopted by empty Bob', () => {
+    StorageService.setOwner(null);
+    StorageService.savePlace(userPlace({ id: undefined, name: 'Anonymous dest cafe' }));
+    localStorage.setItem(
+      LEGACY_WORKING_COPY_KEYS.saved_places,
+      JSON.stringify([userPlace({ name: 'Alice-leftover' })]),
+    );
+
+    StorageService.setOwner(null);
+    const retainedAfterAnonymousPass = localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places) == null
+      && JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES)))
+        .some((place) => place.name === 'Alice-leftover');
+    expect(retainedAfterAnonymousPass).toBe(true);
+    expect(StorageService.getSavedPlaces().some((place) => place.name === 'Alice-leftover')).toBe(false);
+
+    StorageService.setOwner(SESSION_B.user.id);
+    const bobPlaces = StorageService.getSavedPlaces().map((place) => place.name);
+    expect(bobPlaces).not.toContain('Alice-leftover');
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES))))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Alice-leftover' })]));
+  });
+
+  test('edited demo in a legacy key is promoted to user-authored on migrate/load', () => {
+    const editedDemo = {
+      id: 'demo-1',
+      source: 'demo',
+      name: 'Sunshine Daycare',
+      category: 'favorite',
+      people: ['Maya'],
+      contacts: [{ type: 'phone_mobile', label: 'Director', value: '(555) 222-3333' }],
+      events: [],
+      address: '12 Childcare Ln',
+      notes: 'alarm code 4512',
+      color: '#f59e0b',
+      lat: 37.77,
+      lng: -122.41,
+      createdAt: 1,
+    };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify([
+      editedDemo,
+      {
+        id: 'demo-2',
+        source: 'demo',
+        name: 'The Millers (Neighbors)',
+        category: 'neighbor',
+        people: ['Bob Miller', 'Karen Miller'],
+        contacts: [
+          { type: 'phone_mobile', label: 'Bob Cell', value: '(555) 987-6543' },
+          { type: 'phone_home', label: 'House Landline', value: '(555) 987-1122' },
+          { type: 'email_personal', label: 'Karen Email', value: 'millers742@gmail.com' },
+        ],
+        events: [
+          { title: 'Trash & Recycling Pickup', day: 'tuesday', time: '7:00 AM' },
+        ],
+        address: '742 Evergreen Terrace',
+        notes: 'Friendly neighbors. Have spare house key & key to water shutoff.',
+        color: '#10b981',
+        lat: 37.7765,
+        lng: -122.4170,
+        createdAt: Date.now() - 86400000 * 2,
+      },
+    ]));
+
+    const loaded = StorageService.getSavedPlaces();
+    const converted = loaded.find((place) => place.notes === 'alarm code 4512');
+    expect(converted).toBeTruthy();
+    expect(converted.id).not.toBe('demo-1');
+    expect(converted.source).toBeUndefined();
+    expect(isDemoPlace(converted)).toBe(false);
+    expect(loaded.some((place) => place.id === 'demo-2' && isDemoPlace(place))).toBe(true);
+    expect(isUserAuthoredWorkingCopy({ savedPlaces: loaded })).toBe(true);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
+  });
+
+  test('concurrent older-tab write during copy is quarantined not deleted', () => {
+    const destKey = workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const legacyKey = LEGACY_WORKING_COPY_KEYS.home_address;
+    const oldVal = JSON.stringify({ name: 'old', lat: 1, lng: 1 });
+    const newVal = JSON.stringify({ name: 'new', lat: 2, lng: 2 });
+    const inner = createMemoryLocalStorage({ [legacyKey]: oldVal });
+    globalThis.localStorage = {
+      getItem: (key) => inner.getItem(key),
+      setItem(key, value) {
+        inner.setItem(key, value);
+        if (key === destKey && value === oldVal) {
+          inner.setItem(legacyKey, newVal);
+        }
+      },
+      removeItem: (key) => inner.removeItem(key),
+      clear: () => inner.clear(),
+      key: (index) => inner.key(index),
+      get length() {
+        return inner.length;
+      },
+    };
+
+    StorageService.setOwner(null);
+
+    expect(localStorage.getItem(destKey)).toBe(oldVal);
+    expect(localStorage.getItem(legacyKey)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe('new');
+  });
 });
 
 describe('working-copy bind and login I/O', () => {
@@ -464,6 +579,7 @@ describe('working-copy bind and login I/O', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);
     globalThis.localStorage = originalLocalStorage;
   });
@@ -690,6 +806,53 @@ describe('working-copy bind and login I/O', () => {
     unsubscribe();
     await auth.signOut();
     expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
+
+    auth.dispose();
+  });
+
+  test('storage exceptions after identity flip still notify owner change', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress({ name: 'A private home', lat: 1, lng: 1 });
+
+    const client = new FakeAuthClient({ session: SESSION_A });
+    const auth = createAuthState(client);
+    const owners = [];
+    bindNeighborhoodWorkingCopy(auth, StorageService, {
+      onOwnerChange: (ownerId) => owners.push(ownerId),
+    });
+    await auth.initialize();
+    expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
+
+    const inner = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem() {
+        const err = new Error('blocked');
+        err.name = 'SecurityError';
+        throw err;
+      },
+      setItem() {
+        const err = new Error('blocked');
+        err.name = 'SecurityError';
+        throw err;
+      },
+      removeItem() {
+        const err = new Error('blocked');
+        err.name = 'SecurityError';
+        throw err;
+      },
+      clear: () => inner.clear(),
+      key: (index) => inner.key(index),
+      get length() {
+        return inner.length;
+      },
+    };
+
+    await auth.signIn({ session: SESSION_B });
+
+    expect(auth.getState().user.id).toBe(SESSION_B.user.id);
+    expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+    expect(StorageService.getNamespaceId()).toBe(`user:${SESSION_B.user.id}`);
+    expect(owners).toContain(SESSION_B.user.id);
 
     auth.dispose();
   });

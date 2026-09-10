@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 
 import { FakeAuthClient, createAuthState } from '../src/js/auth/index.js';
+import { JamBaseService } from '../src/js/jambase-service.js';
+import { OverpassService } from '../src/js/overpass-service.js';
 import { bindNeighborhoodWorkingCopy } from '../src/js/neighborhood-working-copy.js';
 import { NeighborhoodGuruApp } from '../src/main.js';
 import {
@@ -10,6 +12,9 @@ import {
 
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = globalThis.localStorage;
+const originalSearchVenues = JamBaseService.searchVenues;
+const originalFetchVenueDetails = JamBaseService.fetchVenueDetails;
+const originalFetchNearbyPois = OverpassService.fetchNearbyPois;
 
 const SESSION_A = {
   user: { id: 'user-ada', displayName: 'Ada', email: 'ada@example.test', avatarUrl: null },
@@ -61,6 +66,8 @@ function createStubUi() {
     formLng: '-122.41',
     formCategory: 'favorite',
     formAddress: '102 Oak',
+    formJambaseId: '',
+    formCapacity: '',
   };
   const elements = {
     formLocationId: { get value() { return values.formLocationId; }, set value(v) { values.formLocationId = v; } },
@@ -70,8 +77,11 @@ function createStubUi() {
     formLng: { get value() { return values.formLng; }, set value(v) { values.formLng = v; } },
     formCategory: { get value() { return values.formCategory; }, set value(v) { values.formCategory = v; } },
     formAddress: { get value() { return values.formAddress; }, set value(v) { values.formAddress = v; } },
-    formCapacity: { value: '' },
-    formJambaseId: { value: '' },
+    formCapacity: { get value() { return values.formCapacity; }, set value(v) { values.formCapacity = v; } },
+    formJambaseId: { get value() { return values.formJambaseId; }, set value(v) { values.formJambaseId = v; } },
+    jambasePickerSubtitle: { textContent: '' },
+    jambaseStatusMsg: { textContent: '' },
+    poiStatusSubtitle: { textContent: '' },
     locationForm: {
       reset() {
         values.formLocationId = '';
@@ -80,6 +90,8 @@ function createStubUi() {
         values.formLat = '';
         values.formLng = '';
         values.formAddress = '';
+        values.formJambaseId = '';
+        values.formCapacity = '';
       },
       querySelector: () => null,
     },
@@ -97,17 +109,27 @@ function createStubUi() {
     elements,
     renderedHome: 'A private home',
     renderedPlaces: [],
+    renderedPois: [],
     formOpen: true,
+    pickerOpens: 0,
+    jambaseOnSelect: null,
     toasts: [],
     weatherUpdates: [],
     resetOwnerScopedPresentation() {
       this.formOpen = false;
+      this.jambaseOnSelect = null;
       elements.locationForm.reset();
     },
     openLocationModal() { this.formOpen = true; },
     closeLocationModal() { this.formOpen = false; },
+    openPoiModal() {},
     closePoiModal() {},
+    openJambasePickerModal() { this.pickerOpens += 1; },
     closeJambasePickerModal() {},
+    renderJambaseSearchResults(matches, onSelect) {
+      this.jambaseOnSelect = onSelect;
+    },
+    renderPoiResults(pois) { this.renderedPois = pois; },
     updateHomeHeaderStatus(home) {
       this.renderedHome = home?.name || 'Earth Globe View';
     },
@@ -169,8 +191,12 @@ describe('owner-switch presentation isolation', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);
     globalThis.localStorage = originalLocalStorage;
+    JamBaseService.searchVenues = originalSearchVenues;
+    JamBaseService.fetchVenueDetails = originalFetchVenueDetails;
+    OverpassService.fetchNearbyPois = originalFetchNearbyPois;
   });
 
   test('switching accounts closes the editor and cannot save A into B', async () => {
@@ -302,5 +328,191 @@ describe('owner-switch presentation isolation', () => {
     expect(StorageService.getOwnerId()).toBe(ownerAtDispose);
 
     app.dispose();
+  });
+
+  test('late JamBase search after an owner switch does not open A picker or write into B', async () => {
+    let resolveSearch;
+    const searchPromise = new Promise((resolve) => {
+      resolveSearch = resolve;
+    });
+    JamBaseService.searchVenues = async () => searchPromise;
+
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress(HOME_A);
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Ada venue', lat: 1, lng: 1 });
+    ui.elements.formName.value = 'Ada venue';
+
+    const searchDone = app.handleJambaseSearch();
+    await auth.signIn({ session: SESSION_B });
+    app.openLocationEditor({ name: 'Bob venue', lat: 2, lng: 2 });
+    ui.elements.formName.value = 'Bob venue';
+    resolveSearch([{ id: 'ada-venue', name: 'Ada leftover venue', city: 'SF', state: 'CA' }]);
+    await searchDone;
+
+    expect(ui.pickerOpens).toBe(0);
+    expect(ui.elements.formJambaseId.value).not.toBe('ada-venue');
+    expect(app.editorNamespaceId).toBe(`user:${SESSION_B.user.id}`);
+    expect(app.editorMatchesCurrentOwner()).toBe(true);
+
+    app.dispose();
+  });
+
+  test('JamBase venue details after an owner switch do not apply to B editor', async () => {
+    JamBaseService.searchVenues = async () => [{ id: 'ada-venue', name: 'Ada venue' }];
+    let resolveDetails;
+    JamBaseService.fetchVenueDetails = () => new Promise((resolve) => {
+      resolveDetails = resolve;
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Ada venue', lat: 1, lng: 1 });
+    ui.elements.formName.value = 'Ada venue';
+    await app.handleJambaseSearch();
+    expect(ui.pickerOpens).toBe(1);
+    expect(typeof ui.jambaseOnSelect).toBe('function');
+
+    const selectPromise = ui.jambaseOnSelect({ id: 'ada-venue', name: 'Ada venue' });
+    await auth.signIn({ session: SESSION_B });
+    app.openLocationEditor({ name: 'Bob venue', lat: 2, lng: 2 });
+    resolveDetails({ capacity: 1200 });
+    await selectPromise;
+
+    expect(ui.elements.formJambaseId.value).not.toBe('ada-venue');
+    expect(ui.elements.formCapacity.value).not.toBe(1200);
+    expect(ui.elements.formCapacity.value).not.toBe('1200');
+
+    app.dispose();
+  });
+
+  test('late POI results are not assigned or rendered for the next owner', async () => {
+    let resolvePois;
+    OverpassService.fetchNearbyPois = () => new Promise((resolve) => {
+      resolvePois = resolve;
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress(HOME_A);
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+
+    const discoverPromise = app.handleDiscoverPois();
+    await auth.signIn({ session: SESSION_B });
+    resolvePois([{ name: 'Ada cafe', typeLabel: 'Cafe', category: 'favorite', address: '', notes: '', color: '#3b82f6', lat: 1, lng: 1 }]);
+    await discoverPromise;
+
+    expect(app.currentDiscoveredPois).toEqual([]);
+    app.applyPoiFilter();
+    expect(ui.renderedPois).toEqual([]);
+
+    app.dispose();
+  });
+
+  test('storage exceptions still clear the previous owner UI', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress(HOME_A);
+    StorageService.savePlace(PLACE_A);
+
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+    expect(ui.renderedHome).toBe('A private home');
+    const ownerChanges = [];
+    const previousOnChange = app.unsubscribeWorkingCopy;
+    previousOnChange?.();
+    app.unsubscribeWorkingCopy = bindNeighborhoodWorkingCopy(auth, StorageService, {
+      onOwnerChange: (ownerId) => {
+        ownerChanges.push(ownerId);
+        if (app.viewReady && !app.disposed) {
+          app.syncNeighborhoodViewFromStorage({ ownerChanged: true });
+        }
+      },
+    });
+
+    const inner = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem() {
+        const err = new Error('blocked');
+        err.name = 'SecurityError';
+        throw err;
+      },
+      setItem() {
+        const err = new Error('blocked');
+        err.name = 'SecurityError';
+        throw err;
+      },
+      removeItem() {
+        const err = new Error('blocked');
+        err.name = 'SecurityError';
+        throw err;
+      },
+      clear: () => inner.clear(),
+      key: (index) => inner.key(index),
+      get length() {
+        return inner.length;
+      },
+    };
+
+    await auth.signIn({ session: SESSION_B });
+
+    expect(auth.getState().user.id).toBe(SESSION_B.user.id);
+    expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+    expect(StorageService.getNamespaceId()).toBe(`user:${SESSION_B.user.id}`);
+    expect(ownerChanges).toContain(SESSION_B.user.id);
+    expect(ui.renderedHome).toBe('Earth Globe View');
+    expect(app.homeAddress).toBeNull();
+    expect(ui.formOpen).toBe(false);
+
+    app.dispose();
+  });
+
+  test('delete is refused when the editor namespace no longer matches', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.savePlace(PLACE_A);
+    StorageService.setOwner(SESSION_B.user.id);
+    StorageService.savePlace({ ...PLACE_A, id: 'place_bob', name: 'Bob place', notes: 'bob notes' });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor(PLACE_A);
+    ui.elements.formLocationId.value = PLACE_A.id;
+
+    await auth.signIn({ session: SESSION_B });
+    app.handleDeleteLocation();
+
+    expect(ui.toasts.some((message) => /not deleted/i.test(message))).toBe(true);
+    StorageService.setOwner(SESSION_A.user.id);
+    expect(StorageService.getSavedPlaces().some((place) => place.notes === PLACE_A.notes)).toBe(true);
+    StorageService.setOwner(SESSION_B.user.id);
+    expect(StorageService.getSavedPlaces().some((place) => place.notes === 'bob notes')).toBe(true);
+
+    app.dispose();
+  });
+
+  test('owner clear hides the previous weather immediately', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress(HOME_A);
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+
+    await auth.signIn({ session: SESSION_B });
+    expect(ui.weatherUpdates).toContain(null);
+
+    app.dispose();
+  });
+
+  test('dispose clears the sun interval and JamBase fallback callback', async () => {
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.sunAnimationTimer = setInterval(() => {}, 10000);
+    JamBaseService.setApiFallbackCallback(() => {});
+    expect(typeof JamBaseService._onApiFallback).toBe('function');
+
+    app.dispose();
+    expect(app.sunAnimationTimer).toBeNull();
+    expect(JamBaseService._onApiFallback).toBeNull();
   });
 });

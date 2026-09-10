@@ -155,6 +155,7 @@ export class NeighborhoodGuruApp {
     this.editorNamespaceId = null;
     try {
       this.ui.resetOwnerScopedPresentation?.();
+      this.ui.updateWeatherDisplay?.(null);
       this.mapboxService.clearTempMarker?.();
       this.mapboxService.currentTempCoords = null;
       if (this.mapboxService.homeMarker) {
@@ -201,9 +202,22 @@ export class NeighborhoodGuruApp {
     return !this.disposed && generation === this.neighborhoodGeneration;
   }
 
+  isSameOwnerGeneration(generation, namespaceId) {
+    return this.isCurrentGeneration(generation) && this.storage.getNamespaceId() === namespaceId;
+  }
+
+  editorMatchesCurrentOwner() {
+    return this.editorNamespaceId != null && this.editorNamespaceId === this.storage.getNamespaceId();
+  }
+
   dispose() {
     this.disposed = true;
     this.neighborhoodGeneration += 1;
+    if (this.sunAnimationTimer) {
+      clearInterval(this.sunAnimationTimer);
+      this.sunAnimationTimer = null;
+    }
+    JamBaseService.setApiFallbackCallback(null);
     this.unsubscribeWorkingCopy?.();
     this.unsubscribeWorkingCopy = null;
     this.unsubscribeAuth?.();
@@ -349,19 +363,7 @@ export class NeighborhoodGuruApp {
     });
 
     el.deleteLocationBtn.addEventListener('click', () => {
-      const id = el.formLocationId.value;
-      if (id && confirm('Are you sure you want to delete this location contact?')) {
-        this.savedPlaces = this.storage.deletePlace(id);
-        this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
-        this.ui.renderPlacesList(
-          this.savedPlaces,
-          (place) => this.onPlaceSelected(place),
-          (place) => this.openLocationEditor(place)
-        );
-        this.ui.closeLocationModal();
-        this.mapboxService.clearTempMarker();
-        this.ui.showToast('Location deleted', 'info');
-      }
+      this.handleDeleteLocation();
     });
 
     // --- Settings Modal Handlers ---
@@ -539,65 +541,8 @@ export class NeighborhoodGuruApp {
 
     // --- JamBase Venue Search & Selection Handler ---
     if (el.searchJambaseBtn) {
-      el.searchJambaseBtn.addEventListener('click', async () => {
-        const venueName = el.formName.value.trim();
-        const currentInput = el.formJambaseId ? el.formJambaseId.value.trim() : '';
-        const query = currentInput || venueName;
-        const addressText = el.formAddress ? el.formAddress.value.trim() : '';
-
-        if (!query) {
-          this.ui.showToast('Enter a venue name or JamBase ID/URL to search.', 'warning');
-          return;
-        }
-
-        // Extract city & state from address if available
-        let locationContext = {};
-        if (addressText) {
-          const parts = addressText.split(',').map(s => s.trim());
-          if (parts.length >= 2) {
-            locationContext.city = parts[parts.length - 2] || parts[0];
-            const stateZip = parts[parts.length - 1].split(' ');
-            locationContext.state = stateZip[0] || '';
-          } else {
-            locationContext.city = parts[0];
-          }
-        } else if (this.homeAddress && this.homeAddress.name) {
-          const parts = this.homeAddress.name.split(',').map(s => s.trim());
-          if (parts.length >= 2) {
-            locationContext.city = parts[1] || parts[0];
-          }
-        }
-
-        this.ui.showToast(`Searching JamBase for "${query}"...`, 'info');
-        const matches = await JamBaseService.searchVenues(query, locationContext);
-
-        this.ui.openJambasePickerModal();
-        if (this.ui.elements.jambasePickerSubtitle) {
-          this.ui.elements.jambasePickerSubtitle.textContent = `Found ${matches.length} venue match${matches.length === 1 ? '' : 'es'} for "${query}"`;
-        }
-
-        this.ui.renderJambaseSearchResults(matches, async (selectedVenue) => {
-          if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
-          
-          let capacity = selectedVenue.capacity;
-          if (!capacity) {
-            const details = await JamBaseService.fetchVenueDetails(selectedVenue.id);
-            if (details && details.capacity) {
-              capacity = details.capacity;
-            }
-          }
-
-          if (capacity && el.formCapacity) {
-            el.formCapacity.value = capacity;
-          }
-
-          if (el.jambaseStatusMsg) {
-            const locText = [selectedVenue.city, selectedVenue.state].filter(Boolean).join(', ');
-            const capText = capacity ? ` | Cap: ${capacity}` : '';
-            el.jambaseStatusMsg.textContent = `✓ Linked to ${selectedVenue.name} ${locText ? `(${locText})` : ''}${capText}`;
-          }
-          this.ui.showToast(`Linked venue to ${selectedVenue.name}${capacity ? ` (Cap: ${capacity})` : ''}!`, 'success');
-        });
+      el.searchJambaseBtn.addEventListener('click', () => {
+        this.handleJambaseSearch();
       });
     }
 
@@ -682,8 +627,9 @@ export class NeighborhoodGuruApp {
       this.ui.elements.poiStatusSubtitle.textContent = `Searching OpenStreetMap near (${lat.toFixed(3)}, ${lng.toFixed(3)})...`;
     }
 
-    this.currentDiscoveredPois = await OverpassService.fetchNearbyPois(lat, lng, 1500);
+    const pois = await OverpassService.fetchNearbyPois(lat, lng, 1500);
     if (!this.isCurrentGeneration(generation)) return;
+    this.currentDiscoveredPois = pois;
     this.poiDiscoveryGeneration = generation;
 
     if (this.ui.elements.poiStatusSubtitle) {
@@ -694,6 +640,7 @@ export class NeighborhoodGuruApp {
   }
 
   applyPoiFilter() {
+    if (!this.isCurrentGeneration(this.poiDiscoveryGeneration)) return;
     const filtered = this.currentDiscoveredPois.filter(p => {
       if (this.poiFilter === 'all') return true;
       if (this.poiFilter === 'cafe') return p.typeLabel.includes('Cafe');
@@ -885,10 +832,109 @@ export class NeighborhoodGuruApp {
   }
 
   /**
+   * Delete Location Form Handler
+   */
+  handleDeleteLocation() {
+    if (!this.editorMatchesCurrentOwner()) {
+      this.ui.resetOwnerScopedPresentation?.();
+      this.ui.showToast?.('Account changed. That location was not deleted.', 'error');
+      return;
+    }
+    const el = this.ui.elements;
+    const id = el.formLocationId.value;
+    if (id && confirm('Are you sure you want to delete this location contact?')) {
+      this.savedPlaces = this.storage.deletePlace(id);
+      this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
+      this.ui.renderPlacesList(
+        this.savedPlaces,
+        (place) => this.onPlaceSelected(place),
+        (place) => this.openLocationEditor(place)
+      );
+      this.ui.closeLocationModal();
+      this.mapboxService.clearTempMarker();
+      this.ui.showToast('Location deleted', 'info');
+    }
+  }
+
+  /**
+   * JamBase venue search. Generation and namespace are captured before the
+   * network call and revalidated after every await, before opening the
+   * picker, before applying a selection, and after fetchVenueDetails().
+   */
+  async handleJambaseSearch() {
+    const el = this.ui.elements;
+    const generation = this.neighborhoodGeneration;
+    const namespaceId = this.storage.getNamespaceId();
+    const venueName = el.formName.value.trim();
+    const currentInput = el.formJambaseId ? el.formJambaseId.value.trim() : '';
+    const query = currentInput || venueName;
+    const addressText = el.formAddress ? el.formAddress.value.trim() : '';
+
+    if (!query) {
+      this.ui.showToast('Enter a venue name or JamBase ID/URL to search.', 'warning');
+      return;
+    }
+
+    let locationContext = {};
+    if (addressText) {
+      const parts = addressText.split(',').map(s => s.trim());
+      if (parts.length >= 2) {
+        locationContext.city = parts[parts.length - 2] || parts[0];
+        const stateZip = parts[parts.length - 1].split(' ');
+        locationContext.state = stateZip[0] || '';
+      } else {
+        locationContext.city = parts[0];
+      }
+    } else if (this.homeAddress && this.homeAddress.name) {
+      const parts = this.homeAddress.name.split(',').map(s => s.trim());
+      if (parts.length >= 2) {
+        locationContext.city = parts[1] || parts[0];
+      }
+    }
+
+    this.ui.showToast(`Searching JamBase for "${query}"...`, 'info');
+    const matches = await JamBaseService.searchVenues(query, locationContext);
+    if (!this.isSameOwnerGeneration(generation, namespaceId)) return;
+
+    this.ui.openJambasePickerModal();
+    if (this.ui.elements.jambasePickerSubtitle) {
+      this.ui.elements.jambasePickerSubtitle.textContent = `Found ${matches.length} venue match${matches.length === 1 ? '' : 'es'} for "${query}"`;
+    }
+
+    this.ui.renderJambaseSearchResults(matches, async (selectedVenue) => {
+      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentOwner()) return;
+
+      let capacity = selectedVenue.capacity;
+      if (!capacity) {
+        const details = await JamBaseService.fetchVenueDetails(selectedVenue.id);
+        if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentOwner()) return;
+        if (details && details.capacity) {
+          capacity = details.capacity;
+        }
+      }
+
+      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentOwner()) return;
+
+      if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
+
+      if (capacity && el.formCapacity) {
+        el.formCapacity.value = capacity;
+      }
+
+      if (el.jambaseStatusMsg) {
+        const locText = [selectedVenue.city, selectedVenue.state].filter(Boolean).join(', ');
+        const capText = capacity ? ` | Cap: ${capacity}` : '';
+        el.jambaseStatusMsg.textContent = `✓ Linked to ${selectedVenue.name} ${locText ? `(${locText})` : ''}${capText}`;
+      }
+      this.ui.showToast(`Linked venue to ${selectedVenue.name}${capacity ? ` (Cap: ${capacity})` : ''}!`, 'success');
+    });
+  }
+
+  /**
    * Save Location Form Handler
    */
   handleSaveLocation() {
-    if (this.editorNamespaceId !== this.storage.getNamespaceId()) {
+    if (!this.editorMatchesCurrentOwner()) {
       this.ui.resetOwnerScopedPresentation?.();
       this.ui.showToast?.('Account changed. That location was not saved.', 'error');
       return;

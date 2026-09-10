@@ -23,6 +23,15 @@ export const LEGACY_WORKING_COPY_KEYS = Object.freeze({
   [WORKING_COPY_KEYS.SAVED_PLACES]: 'neighborhood_guru_saved_places',
 });
 
+/** Reserved, non-adoptable keys for divergent leftovers that must not follow a later account. */
+export const ORPHANED_WORKING_COPY_PREFIX = 'neighborhood_guru:orphaned:';
+
+export function orphanedWorkingCopyKey(suffix, token = '') {
+  return token
+    ? `${ORPHANED_WORKING_COPY_PREFIX}${suffix}:${token}`
+    : `${ORPHANED_WORKING_COPY_PREFIX}${suffix}`;
+}
+
 // Default Sample Neighborhood Data if storage is empty
 const DEMO_PLACES = [
   {
@@ -119,6 +128,24 @@ export function isDemoPlace(place) {
   if (!place || typeof place !== 'object') return false;
   if (place.source === 'demo') return true;
   return isDemoSeedId(place.id);
+}
+
+const DEMO_COMPARE_OMIT = new Set(['id', 'source', 'createdAt', 'updatedAt']);
+
+function demoContentSnapshot(place) {
+  const snapshot = {};
+  for (const key of Object.keys(place).sort()) {
+    if (DEMO_COMPARE_OMIT.has(key)) continue;
+    snapshot[key] = place[key];
+  }
+  return JSON.stringify(snapshot);
+}
+
+export function isUntouchedDemoSeed(place) {
+  if (!isDemoPlace(place)) return false;
+  const seed = DEMO_PLACES.find((candidate) => candidate.id === place.id);
+  if (!seed) return false;
+  return demoContentSnapshot(place) === demoContentSnapshot(seed);
 }
 
 export function isUserAuthoredWorkingCopy({ homeAddress = null, savedPlaces = [] } = {}) {
@@ -227,32 +254,83 @@ function namespaceKey(anonymous, ownerId, suffix) {
   return anonymous ? workingCopyKey(null, suffix) : authenticatedWorkingCopyKey(ownerId, suffix);
 }
 
+function matchesCopiedValue(value, copied) {
+  return value === copied || storageValuesEquivalent(value, copied);
+}
+
+/**
+ * Move a leftover off the adoptable unprefixed key so a later empty account
+ * cannot inherit it. Orphaned keys are never read by migrate/load.
+ */
+function quarantineLegacyValue(suffix, value) {
+  const primary = orphanedWorkingCopyKey(suffix);
+  const existing = readItem(primary);
+  if (existing == null) {
+    writeItem(primary, value);
+    return readItem(primary) === value;
+  }
+  if (matchesCopiedValue(existing, value)) {
+    return true;
+  }
+  const overflow = orphanedWorkingCopyKey(
+    suffix,
+    `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+  );
+  writeItem(overflow, value);
+  return readItem(overflow) === value;
+}
+
 /**
  * Move unprefixed working-copy keys into the active namespace once.
  * Local only — never an upload.
  *
- * A legacy key is removed only after it was copied into an empty destination
- * or is identical to the destination. If both exist and differ (including
- * demo dest vs user leftover, malformed JSON, or an older tab's write),
- * both are preserved.
+ * A legacy key is removed only after dest and the current source still equal
+ * the copied snapshot. If dest already exists and differs, or either side
+ * changes during the copy, the leftover is quarantined under a reserved
+ * non-adoptable key so a later empty account cannot adopt it.
  */
 function migrateLegacyWorkingCopy(anonymous, ownerId) {
   for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
-    const legacy = readItem(legacyKey);
-    if (legacy == null) continue;
+    const copied = readItem(legacyKey);
+    if (copied == null) continue;
     const destKey = namespaceKey(anonymous, ownerId, suffix);
     const dest = readItem(destKey);
     if (dest == null) {
-      writeItem(destKey, legacy);
-      if (readItem(destKey) === legacy) {
-        removeItem(legacyKey);
-      }
+      writeItem(destKey, copied);
+    }
+
+    const destNow = readItem(destKey);
+    const sourceNow = readItem(legacyKey);
+    if (sourceNow == null) continue;
+
+    const destMatchesCopied = destNow != null && matchesCopiedValue(destNow, copied);
+    const sourceMatchesCopied = matchesCopiedValue(sourceNow, copied);
+    if (destMatchesCopied && sourceMatchesCopied) {
+      removeItem(legacyKey);
       continue;
     }
-    if (storageValuesEquivalent(dest, legacy)) {
+
+    // Copy did not land; leave the adoptable key for a later retry.
+    if (destNow == null) continue;
+
+    // Dest has data that is not a proven copy of the current source, or the
+    // source changed after we copied. Quarantine so later accounts cannot adopt.
+    if (quarantineLegacyValue(suffix, sourceNow)) {
       removeItem(legacyKey);
     }
   }
+}
+
+function promoteEditedDemoPlaces(places) {
+  let changed = false;
+  const next = places.map((place) => {
+    if (!isDemoPlace(place) || isUntouchedDemoSeed(place)) return place;
+    changed = true;
+    const promoted = { ...place, id: mintPlaceId(), updatedAt: Date.now() };
+    delete promoted.source;
+    return promoted;
+  });
+  return { places: next, changed };
 }
 
 function readWorkingCopy(anonymous, ownerId, suffix) {
@@ -286,8 +364,11 @@ export const StorageService = {
    * Switch the working copy. Does not copy values between namespaces.
    * `null` selects the unsigned-in anonymous namespace. An authenticated
    * user.id of `"anonymous"` is stored under the distinct `user:` tag.
+   *
+   * Identity is applied before any localStorage I/O. Pass `{ migrate: false }`
+   * to flip the owner without touching storage so callers can clear UI first.
    */
-  setOwner(ownerId) {
+  setOwner(ownerId, { migrate = true } = {}) {
     if (ownerId == null || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
       this._anonymous = true;
       this._ownerId = ANONYMOUS_OWNER_ID;
@@ -297,8 +378,14 @@ export const StorageService = {
       this._anonymous = false;
       this._ownerId = ownerId;
     }
-    migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+    if (migrate) {
+      migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+    }
     return this.getOwnerId();
+  },
+
+  ensureLegacyMigrated() {
+    migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
   },
 
   workingCopyKey(suffix) {
@@ -358,16 +445,19 @@ export const StorageService = {
     try {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
-      
+
       const validModern = parsed.filter(isModernPlace);
-      
-      // Purge any legacy items from localStorage
-      if (validModern.length !== parsed.length) {
-        const finalPlaces = validModern.length > 0 ? validModern : clonePlaces(DEMO_PLACES);
-        writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(finalPlaces));
-        return finalPlaces;
+      if (validModern.length === 0 && parsed.length !== 0) {
+        const seeded = clonePlaces(DEMO_PLACES);
+        writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
+        return seeded;
       }
-      return validModern;
+
+      const { places: promoted, changed } = promoteEditedDemoPlaces(validModern);
+      if (validModern.length !== parsed.length || changed) {
+        writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(promoted));
+      }
+      return promoted;
     } catch (e) {
       return [];
     }
