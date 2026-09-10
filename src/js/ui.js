@@ -155,17 +155,18 @@ export class UIController {
    * Header Status Updates
    */
   updateHomeHeaderStatus(homeAddress) {
+    if (!this.elements?.homeStatusSubtitle) return;
     if (homeAddress && homeAddress.name) {
       const shortAddr = homeAddress.name.split(',')[0];
       this.elements.homeStatusSubtitle.textContent = `Home: ${shortAddr}`;
       this.elements.homeStatusSubtitle.style.color = '#10b981';
-      this.elements.currentHomeDisplay.textContent = homeAddress.name;
-      this.elements.clearHomeBtn.classList.remove('hidden');
+      if (this.elements.currentHomeDisplay) this.elements.currentHomeDisplay.textContent = homeAddress.name;
+      this.elements.clearHomeBtn?.classList.remove('hidden');
     } else {
       this.elements.homeStatusSubtitle.textContent = 'Earth Globe View';
       this.elements.homeStatusSubtitle.style.color = '#3b82f6';
-      this.elements.currentHomeDisplay.textContent = 'No Home address configured yet';
-      this.elements.clearHomeBtn.classList.add('hidden');
+      if (this.elements.currentHomeDisplay) this.elements.currentHomeDisplay.textContent = 'No Home address configured yet';
+      this.elements.clearHomeBtn?.classList.add('hidden');
     }
   }
 
@@ -584,7 +585,38 @@ export class UIController {
   }
 
   closeLocationModal() {
-    this.elements.locationModal.classList.add('hidden');
+    this.elements?.locationModal?.classList?.add('hidden');
+  }
+
+  resetLocationEditor() {
+    const el = this.elements || {};
+    if (el.locationForm && typeof el.locationForm.reset === 'function') {
+      el.locationForm.reset();
+    }
+    for (const field of [
+      'formLocationId', 'formLat', 'formLng', 'formName', 'formCategory',
+      'formAddress', 'formNotes', 'formCapacity', 'formJambaseId', 'formPollstarId',
+    ]) {
+      if (el[field]) el[field].value = '';
+    }
+    if (el.locationModalCoords) el.locationModalCoords.textContent = '';
+    if (el.jambaseStatusMsg) el.jambaseStatusMsg.textContent = '';
+    if (el.peopleListContainer) el.peopleListContainer.innerHTML = '';
+    if (el.contactMethodsContainer) el.contactMethodsContainer.innerHTML = '';
+    if (el.eventsListContainer) el.eventsListContainer.innerHTML = '';
+    if (el.poiResultsContainer) el.poiResultsContainer.innerHTML = '';
+    if (el.jambasePickerResultsContainer) el.jambasePickerResultsContainer.innerHTML = '';
+    this.closeLocationModal();
+  }
+
+  /**
+   * Close owner-scoped editors so an account switch cannot leak or submit
+   * another namespace's contacts, notes, or coordinates.
+   */
+  resetOwnerScopedPresentation() {
+    this.resetLocationEditor();
+    this.closePoiModal();
+    this.closeJambasePickerModal();
   }
 
   /**
@@ -604,6 +636,7 @@ export class UIController {
    * Render Saved Places Sidebar List
    */
   renderPlacesList(places = [], onPlaceClick = null, onEditClick = null) {
+    if (!this.elements?.placesCountBadge || !this.elements?.savedPlacesList) return;
     this.elements.placesCountBadge.textContent = places.length;
     const listContainer = this.elements.savedPlacesList;
     listContainer.innerHTML = '';

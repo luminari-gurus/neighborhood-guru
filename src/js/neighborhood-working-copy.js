@@ -35,19 +35,24 @@ export function bindNeighborhoodWorkingCopy(
   // Reserved so callers/tests can pass a store spy. Must stay unused here.
   void neighborhoodStore;
 
-  let currentOwnerId = storage.getOwnerId();
+  let currentNamespaceId = storage.getNamespaceId?.() ?? storage.getOwnerId();
 
   const apply = (state) => {
     const nextOwnerId = ownerIdFromAuthState(state);
-    if (nextOwnerId === undefined) return currentOwnerId;
+    if (nextOwnerId === undefined) return currentNamespaceId;
     storage.setOwner(nextOwnerId);
-    const ownerId = storage.getOwnerId();
-    if (ownerId !== currentOwnerId) {
-      const previousOwnerId = currentOwnerId;
-      currentOwnerId = ownerId;
-      onOwnerChange?.(ownerId, previousOwnerId);
+    const namespaceId = storage.getNamespaceId?.() ?? storage.getOwnerId();
+    if (namespaceId !== currentNamespaceId) {
+      const previousNamespaceId = currentNamespaceId;
+      currentNamespaceId = namespaceId;
+      try {
+        onOwnerChange?.(storage.getOwnerId(), previousNamespaceId);
+      } catch {
+        // Destination is already selected. A throwing listener must not revert
+        // the owner or leave another namespace eligible for writes.
+      }
     }
-    return ownerId;
+    return namespaceId;
   };
 
   apply(auth.getState());

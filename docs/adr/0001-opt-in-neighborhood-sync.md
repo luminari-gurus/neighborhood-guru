@@ -230,12 +230,12 @@ Logical key layout (implementation may prefix with a helper):
 
 | Data | Anonymous | Authenticated |
 | --- | --- | --- |
-| Home / places / sync consent / dirty / last etag | `neighborhood_guru:anonymous:…` | `neighborhood_guru:${userId}:…` |
+| Home / places / sync consent / dirty / last etag | `neighborhood_guru:anonymous:…` | `neighborhood_guru:user:${encodeURIComponent(userId)}:…` |
 | Map style | Device preference; not namespaced in v1; **not synced** | Same |
 | Mapbox / JamBase tokens | Device-level; **not synced** | Same. Optional later namespacing is a separate hardening issue. |
 | JamBase show cache | Device cache; **not synced** | Same |
 
-Existing unprefixed keys (`neighborhood_guru_home_address`, `neighborhood_guru_saved_places`) migrate **once** into the anonymous namespace, or into the sole restored `user.id` namespace when that session is already active, so current users are not reset. That migration is local and is not an upload.
+Existing unprefixed keys (`neighborhood_guru_home_address`, `neighborhood_guru_saved_places`) migrate **once** into the anonymous namespace, or into the sole restored `user.id` namespace when that session is already active, so current users are not reset. That migration is local and is not an upload. Authenticated keys use a distinct `user:` tag so a `user.id` of `anonymous` cannot collide with the unsigned-in bucket; opaque ids are encoded rather than interpolated raw. A legacy key is removed only after a successful copy into an empty destination or when it is identical to the destination; divergent leftover keys are preserved.
 
 **Sign-out** switches the working copy to the anonymous namespace. It must not copy authenticated places into anonymous keys.
 

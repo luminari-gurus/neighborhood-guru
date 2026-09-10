@@ -15,22 +15,33 @@ export function createRuntimeAuthClient(config = globalThis.__NG_RUNTIME_CONFIG_
   return config.authMode === 'optional' || config.authMode === 'required' ? createHttpAuthClient() : createAnonymousAuthClient();
 }
 
-class NeighborhoodGuruApp {
-  constructor() {
-    this.storage = StorageService;
-    this.mapboxService = new MapboxService();
-    this.ui = new UIController();
-    this.auth = createAuthState(createRuntimeAuthClient());
+export class NeighborhoodGuruApp {
+  constructor({
+    storage = StorageService,
+    ui = new UIController(),
+    mapboxService = new MapboxService(),
+    auth = null,
+    authClient = null,
+  } = {}) {
+    this.storage = storage;
+    this.mapboxService = mapboxService;
+    this.ui = ui;
+    this.auth = auth || createAuthState(authClient || createRuntimeAuthClient());
     this.unsubscribeAuth = this.auth.subscribe((state) => {
       this.authState = state;
     });
+    this.unsubscribeWorkingCopy = null;
     this.viewReady = false;
+    this.disposed = false;
 
     this.homeAddress = null;
     this.savedPlaces = [];
     this.sunAnimationTimer = null;
     this.currentDiscoveredPois = [];
     this.poiFilter = 'all';
+    this.neighborhoodGeneration = 0;
+    this.poiDiscoveryGeneration = -1;
+    this.editorNamespaceId = null;
   }
 
   async init() {
@@ -40,11 +51,12 @@ class NeighborhoodGuruApp {
     // Bind after initialize() so restore has already settled (this call does
     // not observe AUTHENTICATING from loadSession). Later sign-in still goes
     // through the subscribe path, which ignores AUTHENTICATING so another
-    // namespace is not flashed. Login never uploads. Process-lifetime: this
-    // SPA has no teardown, so the subscription is not stored or disposed.
-    bindNeighborhoodWorkingCopy(this.auth, this.storage, {
+    // namespace is not flashed. Login never uploads.
+    this.unsubscribeWorkingCopy = bindNeighborhoodWorkingCopy(this.auth, this.storage, {
       onOwnerChange: () => {
-        if (this.viewReady) this.syncNeighborhoodViewFromStorage();
+        if (this.viewReady && !this.disposed) {
+          this.syncNeighborhoodViewFromStorage({ ownerChanged: true });
+        }
       },
     });
 
@@ -94,7 +106,7 @@ class NeighborhoodGuruApp {
         if (map) {
           map.on('load', () => {
             this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
-              this.ui.openLocationModal(place);
+              this.openLocationEditor(place);
             });
           });
         }
@@ -112,24 +124,64 @@ class NeighborhoodGuruApp {
 
   /**
    * Reload home / places from the current namespace and refresh UI.
-   * Used after sign-out and account switch; does not copy between namespaces.
+   * On owner change, fail closed: clear editor/in-memory state before reading
+   * the destination so another user's data cannot remain rendered or be saved.
    */
-  syncNeighborhoodViewFromStorage() {
-    this.homeAddress = this.storage.getHomeAddress();
-    this.savedPlaces = this.storage.getSavedPlaces();
+  syncNeighborhoodViewFromStorage({ ownerChanged = false } = {}) {
+    this.neighborhoodGeneration += 1;
+    this.editorNamespaceId = null;
 
+    if (ownerChanged) {
+      this.clearOwnerScopedPresentation();
+    }
+
+    try {
+      this.homeAddress = this.storage.getHomeAddress();
+      this.savedPlaces = this.storage.getSavedPlaces();
+    } catch {
+      this.homeAddress = null;
+      this.savedPlaces = [];
+    }
+
+    this.renderNeighborhoodView();
+    this.fetchAndDisplayWeather();
+  }
+
+  clearOwnerScopedPresentation() {
+    this.homeAddress = null;
+    this.savedPlaces = [];
+    this.currentDiscoveredPois = [];
+    this.poiDiscoveryGeneration = -1;
+    this.editorNamespaceId = null;
+    try {
+      this.ui.resetOwnerScopedPresentation?.();
+      this.mapboxService.clearTempMarker?.();
+      this.mapboxService.currentTempCoords = null;
+      if (this.mapboxService.homeMarker) {
+        this.mapboxService.homeMarker.remove();
+        this.mapboxService.homeMarker = null;
+      }
+      this.mapboxService.renderSavedMarkers?.([]);
+      this.ui.updateHomeHeaderStatus(null);
+      this.ui.renderPlacesList([], (place) => this.onPlaceSelected(place), (place) => this.openLocationEditor(place));
+    } catch {
+      // Destination render follows; never keep the previous owner's UI.
+    }
+  }
+
+  renderNeighborhoodView() {
     if (!this.ui?.elements || Object.keys(this.ui.elements).length === 0) return;
 
     this.ui.updateHomeHeaderStatus(this.homeAddress);
     this.ui.renderPlacesList(
       this.savedPlaces,
       (place) => this.onPlaceSelected(place),
-      (place) => this.ui.openLocationModal(place)
+      (place) => this.openLocationEditor(place)
     );
 
     if (this.mapboxService.map) {
       this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
-        this.ui.openLocationModal(place);
+        this.openLocationEditor(place);
       });
       if (this.homeAddress) {
         this.mapboxService.renderHomeMarker(this.homeAddress);
@@ -138,8 +190,25 @@ class NeighborhoodGuruApp {
         this.mapboxService.homeMarker = null;
       }
     }
+  }
 
-    this.fetchAndDisplayWeather();
+  openLocationEditor(place) {
+    this.editorNamespaceId = this.storage.getNamespaceId();
+    this.ui.openLocationModal(place);
+  }
+
+  isCurrentGeneration(generation) {
+    return !this.disposed && generation === this.neighborhoodGeneration;
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.neighborhoodGeneration += 1;
+    this.unsubscribeWorkingCopy?.();
+    this.unsubscribeWorkingCopy = null;
+    this.unsubscribeAuth?.();
+    this.unsubscribeAuth = null;
+    this.auth?.dispose?.();
   }
 
   bindEvents() {
@@ -152,6 +221,7 @@ class NeighborhoodGuruApp {
     });
 
     const handleAddLocationClick = async () => {
+      const generation = this.neighborhoodGeneration;
       const mapCenter = this.mapboxService.map ? this.mapboxService.map.getCenter() : { lat: 37.7749, lng: -122.4194 };
       const coords = this.mapboxService.currentTempCoords || {
         lat: mapCenter.lat,
@@ -167,8 +237,10 @@ class NeighborhoodGuruApp {
         console.warn('Reverse geocoding failed', e);
       }
 
+      if (!this.isCurrentGeneration(generation)) return;
+
       // Explicitly ensure id is undefined so a new unique location is created
-      this.ui.openLocationModal({
+      this.openLocationEditor({
         id: undefined,
         lat: coords.lat,
         lng: coords.lng,
@@ -211,7 +283,7 @@ class NeighborhoodGuruApp {
       
       // Re-render markers after style swap
       setTimeout(() => {
-        this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+        this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
         if (this.homeAddress) this.mapboxService.renderHomeMarker(this.homeAddress);
       }, 500);
 
@@ -241,7 +313,7 @@ class NeighborhoodGuruApp {
       this.ui.renderPlacesList(
         this.savedPlaces,
         (place) => this.onPlaceSelected(place),
-        (place) => this.ui.openLocationModal(place)
+        (place) => this.openLocationEditor(place)
       );
     });
 
@@ -256,7 +328,7 @@ class NeighborhoodGuruApp {
       this.ui.renderPlacesList(
         this.savedPlaces,
         (place) => this.onPlaceSelected(place),
-        (place) => this.ui.openLocationModal(place)
+        (place) => this.openLocationEditor(place)
       );
     });
 
@@ -280,11 +352,11 @@ class NeighborhoodGuruApp {
       const id = el.formLocationId.value;
       if (id && confirm('Are you sure you want to delete this location contact?')) {
         this.savedPlaces = this.storage.deletePlace(id);
-        this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+        this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
         this.ui.renderPlacesList(
           this.savedPlaces,
           (place) => this.onPlaceSelected(place),
-          (place) => this.ui.openLocationModal(place)
+          (place) => this.openLocationEditor(place)
         );
         this.ui.closeLocationModal();
         this.mapboxService.clearTempMarker();
@@ -376,8 +448,11 @@ class NeighborhoodGuruApp {
       const file = e.target.files[0];
       if (!file) return;
 
+      const generation = this.neighborhoodGeneration;
+      const namespaceId = this.storage.getNamespaceId();
       const reader = new FileReader();
       reader.onload = (event) => {
+        if (!this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
         const success = this.storage.importDataJSON(event.target.result);
         if (success) {
           this.ui.showToast('Data imported successfully! Reloading...', 'success');
@@ -589,6 +664,7 @@ class NeighborhoodGuruApp {
    * Handle OpenStreetMap POI Discovery
    */
   async handleDiscoverPois() {
+    const generation = this.neighborhoodGeneration;
     let lat = 37.7749;
     let lng = -122.4194;
 
@@ -607,6 +683,8 @@ class NeighborhoodGuruApp {
     }
 
     this.currentDiscoveredPois = await OverpassService.fetchNearbyPois(lat, lng, 1500);
+    if (!this.isCurrentGeneration(generation)) return;
+    this.poiDiscoveryGeneration = generation;
 
     if (this.ui.elements.poiStatusSubtitle) {
       this.ui.elements.poiStatusSubtitle.textContent = `Found ${this.currentDiscoveredPois.length} public amenities within 1.5km`;
@@ -629,6 +707,7 @@ class NeighborhoodGuruApp {
   }
 
   importPoi(poi) {
+    if (!this.isCurrentGeneration(this.poiDiscoveryGeneration)) return;
     const placeData = {
       name: poi.name,
       category: poi.category,
@@ -643,16 +722,17 @@ class NeighborhoodGuruApp {
     };
 
     this.savedPlaces = this.storage.savePlace(placeData);
-    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
     this.ui.renderPlacesList(
       this.savedPlaces,
       (place) => this.onPlaceSelected(place),
-      (place) => this.ui.openLocationModal(place)
+      (place) => this.openLocationEditor(place)
     );
     this.ui.showToast(`Imported ${poi.name.split('(')[0].trim()} to Saved Places!`, 'success');
   }
 
   importAllPois() {
+    if (!this.isCurrentGeneration(this.poiDiscoveryGeneration)) return;
     const filtered = this.currentDiscoveredPois.filter(p => {
       if (this.poiFilter === 'all') return true;
       if (this.poiFilter === 'cafe') return p.typeLabel.includes('Cafe');
@@ -680,11 +760,11 @@ class NeighborhoodGuruApp {
       this.savedPlaces = this.storage.savePlace(placeData);
     });
 
-    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
     this.ui.renderPlacesList(
       this.savedPlaces,
       (place) => this.onPlaceSelected(place),
-      (place) => this.ui.openLocationModal(place)
+      (place) => this.openLocationEditor(place)
     );
     this.ui.closePoiModal();
     this.ui.showToast(`Successfully imported ${filtered.length} local spots!`, 'success');
@@ -694,6 +774,7 @@ class NeighborhoodGuruApp {
    * Fetch Live Weather via Open-Meteo API
    */
   async fetchAndDisplayWeather() {
+    const generation = this.neighborhoodGeneration;
     let lat = 37.7749;
     let lng = -122.4194;
 
@@ -703,6 +784,7 @@ class NeighborhoodGuruApp {
     }
 
     const weather = await WeatherService.getWeather(lat, lng);
+    if (!this.isCurrentGeneration(generation)) return;
     this.ui.updateWeatherDisplay(weather);
   }
 
@@ -710,6 +792,7 @@ class NeighborhoodGuruApp {
    * Handle Map Click: Reverse geocode if possible & open editor modal
    */
   async onMapClicked(coords) {
+    const generation = this.neighborhoodGeneration;
     let placeName = '';
     
     // Attempt reverse geocoding via Mapbox Places API
@@ -720,6 +803,8 @@ class NeighborhoodGuruApp {
       console.warn('Reverse geocoding failed', e);
     }
 
+    if (!this.isCurrentGeneration(generation)) return;
+
     const locationData = {
       lat: coords.lat,
       lng: coords.lng,
@@ -727,28 +812,32 @@ class NeighborhoodGuruApp {
     };
 
     this.mapboxService.showTempMarker(coords, () => {
-      this.ui.openLocationModal(locationData);
+      if (!this.isCurrentGeneration(generation)) return;
+      this.openLocationEditor(locationData);
     });
 
-    this.ui.openLocationModal(locationData);
+    this.openLocationEditor(locationData);
   }
 
   /**
    * Address Search Handler
    */
   async handleAddressSearch() {
+    const generation = this.neighborhoodGeneration;
     const query = this.ui.elements.addressSearchInput.value.trim();
     if (!query) return;
 
     this.ui.showToast(`Searching for "${query}"...`, 'info');
     const result = await this.mapboxService.geocodeAddress(query);
+    if (!this.isCurrentGeneration(generation)) return;
 
     if (result) {
       const coords = { lat: result.lat, lng: result.lng };
       this.mapboxService.flyToLocation(result.lat, result.lng, 16.5);
       
       this.mapboxService.showTempMarker(coords, () => {
-        this.ui.openLocationModal({
+        if (!this.isCurrentGeneration(generation)) return;
+        this.openLocationEditor({
           lat: result.lat,
           lng: result.lng,
           address: result.name,
@@ -765,6 +854,8 @@ class NeighborhoodGuruApp {
    * Set Focused Address as Home Address
    */
   async handleSetHomeAddress() {
+    const generation = this.neighborhoodGeneration;
+    const namespaceId = this.storage.getNamespaceId();
     if (!this.mapboxService.map) {
       this.ui.showToast('Mapbox key required to set home from map center.', 'error');
       this.ui.openKeyPromptModal();
@@ -775,6 +866,7 @@ class NeighborhoodGuruApp {
 
     this.ui.showToast('Updating Home address...', 'info');
     const geocode = await this.mapboxService.geocodeAddress(`${coords.lng},${coords.lat}`);
+    if (!this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
 
     const homeData = {
       name: geocode ? geocode.name : `Home (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`,
@@ -796,6 +888,11 @@ class NeighborhoodGuruApp {
    * Save Location Form Handler
    */
   handleSaveLocation() {
+    if (this.editorNamespaceId !== this.storage.getNamespaceId()) {
+      this.ui.resetOwnerScopedPresentation?.();
+      this.ui.showToast?.('Account changed. That location was not saved.', 'error');
+      return;
+    }
     const el = this.ui.elements;
     const name = el.formName.value.trim() || `Location (${parseFloat(el.formLat.value).toFixed(3)}, ${parseFloat(el.formLng.value).toFixed(3)})`;
 
@@ -831,11 +928,11 @@ class NeighborhoodGuruApp {
     this.mapboxService.currentTempCoords = null;
 
     // Update map markers & sidebar list
-    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.ui.openLocationModal(place));
+    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
     this.ui.renderPlacesList(
       this.savedPlaces,
       (place) => this.onPlaceSelected(place),
-      (place) => this.ui.openLocationModal(place)
+      (place) => this.openLocationEditor(place)
     );
 
     this.ui.closeLocationModal();
@@ -852,7 +949,12 @@ class NeighborhoodGuruApp {
 }
 
 // Initialize Application on DOM Ready
-document.addEventListener('DOMContentLoaded', () => {
-  const app = new NeighborhoodGuruApp();
-  app.init();
-});
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    const app = new NeighborhoodGuruApp();
+    app.init();
+    if (import.meta.hot) {
+      import.meta.hot.dispose(() => app.dispose());
+    }
+  });
+}

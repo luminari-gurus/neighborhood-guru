@@ -83,19 +83,42 @@ export function normalizeOwnerId(ownerId) {
   if (typeof ownerId !== 'string') {
     throw new TypeError('Owner id must be a string or null');
   }
-  const trimmed = ownerId.trim();
-  return trimmed.length === 0 ? ANONYMOUS_OWNER_ID : trimmed;
+  if (ownerId.trim().length === 0) return ANONYMOUS_OWNER_ID;
+  return ownerId;
 }
 
+/**
+ * Namespaced localStorage key for a logical owner.
+ * `null` / blank / the canonical unsigned-in token use the anonymous tag.
+ * Any authenticated user.id, including the string "anonymous", uses a distinct
+ * `user:` tag and encodeURIComponent so AuthClient ids stay injective.
+ */
 export function workingCopyKey(ownerId, suffix) {
-  return `neighborhood_guru:${normalizeOwnerId(ownerId)}:${suffix}`;
+  if (ownerId == null || ownerId === ANONYMOUS_OWNER_ID || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
+    return `neighborhood_guru:${ANONYMOUS_OWNER_ID}:${suffix}`;
+  }
+  if (typeof ownerId !== 'string') {
+    throw new TypeError('Owner id must be a string or null');
+  }
+  return `neighborhood_guru:user:${encodeURIComponent(ownerId)}:${suffix}`;
+}
+
+export function authenticatedWorkingCopyKey(userId, suffix) {
+  if (typeof userId !== 'string' || userId.trim().length === 0) {
+    throw new TypeError('Authenticated owner id must be a non-empty string');
+  }
+  return `neighborhood_guru:user:${encodeURIComponent(userId)}:${suffix}`;
+}
+
+export function isDemoSeedId(id) {
+  const value = String(id || '');
+  return value === 'demo-1' || value === 'demo-2';
 }
 
 export function isDemoPlace(place) {
   if (!place || typeof place !== 'object') return false;
   if (place.source === 'demo') return true;
-  const id = String(place.id || '');
-  return id === 'demo-1' || id === 'demo-2';
+  return isDemoSeedId(place.id);
 }
 
 export function isUserAuthoredWorkingCopy({ homeAddress = null, savedPlaces = [] } = {}) {
@@ -178,62 +201,108 @@ function removeItem(key) {
   localStorage.removeItem(key);
 }
 
-/**
- * Move unprefixed working-copy keys into the active namespace once.
- * Local only — never an upload. Does not overwrite namespaced keys that
- * already exist. Target is the current owner (anonymous, or the restored
- * session's user.id when that is the sole identity using the old keys).
- *
- * Invoked from setOwner and from every working-copy read/write so a getter
- * cannot seed demos into an empty namespaced key before migration runs.
- */
-function migrateLegacyWorkingCopy(ownerId) {
-  const owner = normalizeOwnerId(ownerId);
-  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
-    const legacy = readItem(legacyKey);
-    if (legacy == null) continue;
-    const dest = workingCopyKey(owner, suffix);
-    if (readItem(dest) == null) {
-      writeItem(dest, legacy);
-    }
-    removeItem(legacyKey);
+function mintPlaceId() {
+  return `place_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+}
+
+function parseJsonOr(raw, fallback) {
+  if (raw == null) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
   }
 }
 
-function readWorkingCopy(ownerId, suffix) {
-  migrateLegacyWorkingCopy(ownerId);
-  return readItem(workingCopyKey(ownerId, suffix));
+function storageValuesEquivalent(left, right) {
+  if (left === right) return true;
+  try {
+    return JSON.stringify(JSON.parse(left)) === JSON.stringify(JSON.parse(right));
+  } catch {
+    return false;
+  }
 }
 
-function writeWorkingCopy(ownerId, suffix, value) {
-  migrateLegacyWorkingCopy(ownerId);
-  writeItem(workingCopyKey(ownerId, suffix), value);
+function namespaceKey(anonymous, ownerId, suffix) {
+  return anonymous ? workingCopyKey(null, suffix) : authenticatedWorkingCopyKey(ownerId, suffix);
 }
 
-function removeWorkingCopy(ownerId, suffix) {
-  migrateLegacyWorkingCopy(ownerId);
-  removeItem(workingCopyKey(ownerId, suffix));
+/**
+ * Move unprefixed working-copy keys into the active namespace once.
+ * Local only — never an upload.
+ *
+ * A legacy key is removed only after it was copied into an empty destination
+ * or is identical to the destination. If both exist and differ (including
+ * demo dest vs user leftover, malformed JSON, or an older tab's write),
+ * both are preserved.
+ */
+function migrateLegacyWorkingCopy(anonymous, ownerId) {
+  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+    const legacy = readItem(legacyKey);
+    if (legacy == null) continue;
+    const destKey = namespaceKey(anonymous, ownerId, suffix);
+    const dest = readItem(destKey);
+    if (dest == null) {
+      writeItem(destKey, legacy);
+      if (readItem(destKey) === legacy) {
+        removeItem(legacyKey);
+      }
+      continue;
+    }
+    if (storageValuesEquivalent(dest, legacy)) {
+      removeItem(legacyKey);
+    }
+  }
+}
+
+function readWorkingCopy(anonymous, ownerId, suffix) {
+  migrateLegacyWorkingCopy(anonymous, ownerId);
+  return readItem(namespaceKey(anonymous, ownerId, suffix));
+}
+
+function writeWorkingCopy(anonymous, ownerId, suffix, value) {
+  migrateLegacyWorkingCopy(anonymous, ownerId);
+  writeItem(namespaceKey(anonymous, ownerId, suffix), value);
+}
+
+function removeWorkingCopy(anonymous, ownerId, suffix) {
+  migrateLegacyWorkingCopy(anonymous, ownerId);
+  removeItem(namespaceKey(anonymous, ownerId, suffix));
 }
 
 export const StorageService = {
   _ownerId: ANONYMOUS_OWNER_ID,
+  _anonymous: true,
 
   getOwnerId() {
-    return this._ownerId;
+    return this._anonymous ? ANONYMOUS_OWNER_ID : this._ownerId;
+  },
+
+  getNamespaceId() {
+    return this._anonymous ? ANONYMOUS_OWNER_ID : `user:${this._ownerId}`;
   },
 
   /**
    * Switch the working copy. Does not copy values between namespaces.
-   * `null` selects the anonymous namespace.
+   * `null` selects the unsigned-in anonymous namespace. An authenticated
+   * user.id of `"anonymous"` is stored under the distinct `user:` tag.
    */
   setOwner(ownerId) {
-    this._ownerId = normalizeOwnerId(ownerId);
-    migrateLegacyWorkingCopy(this._ownerId);
-    return this._ownerId;
+    if (ownerId == null || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
+      this._anonymous = true;
+      this._ownerId = ANONYMOUS_OWNER_ID;
+    } else if (typeof ownerId !== 'string') {
+      throw new TypeError('Owner id must be a string or null');
+    } else {
+      this._anonymous = false;
+      this._ownerId = ownerId;
+    }
+    migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+    return this.getOwnerId();
   },
 
   workingCopyKey(suffix) {
-    return workingCopyKey(this._ownerId, suffix);
+    return namespaceKey(this._anonymous, this._ownerId, suffix);
   },
 
   /**
@@ -262,43 +331,45 @@ export const StorageService = {
    * Home Address Object { name, lat, lng, formattedAddress }
    */
   getHomeAddress() {
-    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
-    return raw ? JSON.parse(raw) : null;
+    const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const parsed = parseJsonOr(raw, null);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed;
   },
 
   setHomeAddress(addressObj) {
-    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS, JSON.stringify(addressObj));
+    writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS, JSON.stringify(addressObj));
   },
 
   clearHomeAddress() {
-    removeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
+    removeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
   },
 
   /**
    * Saved Places Array
    */
   getSavedPlaces() {
-    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
+    const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
     if (!raw) {
       const seeded = clonePlaces(DEMO_PLACES);
-      writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
+      writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
       return seeded;
     }
     try {
       const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return clonePlaces(DEMO_PLACES);
+      if (!Array.isArray(parsed)) return [];
       
       const validModern = parsed.filter(isModernPlace);
       
       // Purge any legacy items from localStorage
       if (validModern.length !== parsed.length) {
         const finalPlaces = validModern.length > 0 ? validModern : clonePlaces(DEMO_PLACES);
-        writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(finalPlaces));
+        writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(finalPlaces));
         return finalPlaces;
       }
       return validModern;
     } catch (e) {
-      return clonePlaces(DEMO_PLACES);
+      return [];
     }
   },
 
@@ -308,23 +379,30 @@ export const StorageService = {
     const existingIndex = targetId ? places.findIndex(p => String(p.id) === targetId) : -1;
 
     if (existingIndex >= 0) {
-      places[existingIndex] = { ...places[existingIndex], ...place, id: targetId, updatedAt: Date.now() };
+      const previous = places[existingIndex];
+      const merged = { ...previous, ...place, updatedAt: Date.now() };
+      if (isDemoPlace(previous)) {
+        delete merged.source;
+        merged.id = mintPlaceId();
+      } else {
+        merged.id = targetId;
+      }
+      places[existingIndex] = merged;
     } else {
-      const newId = `place_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
       places.push({
         ...place,
-        id: newId,
+        id: mintPlaceId(),
         createdAt: Date.now(),
       });
     }
 
-    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(places));
+    writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(places));
     return places;
   },
 
   deletePlace(id) {
     const places = this.getSavedPlaces().filter(p => p.id !== id);
-    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(places));
+    writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(places));
     return places;
   },
 
@@ -333,7 +411,7 @@ export const StorageService = {
    * write a remote NeighborhoodStore; these keys stay local.
    */
   getSyncConsent() {
-    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SYNC_CONSENT);
+    const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SYNC_CONSENT);
     if (raw == null) return false;
     try {
       return JSON.parse(raw) === true;
@@ -343,28 +421,28 @@ export const StorageService = {
   },
 
   setSyncConsent(enabled) {
-    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SYNC_CONSENT, JSON.stringify(Boolean(enabled)));
+    writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SYNC_CONSENT, JSON.stringify(Boolean(enabled)));
   },
 
   isDirty() {
-    const raw = readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.DIRTY);
+    const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.DIRTY);
     return raw === '1' || raw === 'true';
   },
 
   setDirty(dirty) {
-    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.DIRTY, dirty ? '1' : '0');
+    writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.DIRTY, dirty ? '1' : '0');
   },
 
   getLastEtag() {
-    return readWorkingCopy(this._ownerId, WORKING_COPY_KEYS.LAST_ETAG);
+    return readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.LAST_ETAG);
   },
 
   setLastEtag(etag) {
     if (etag == null || etag === '') {
-      removeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.LAST_ETAG);
+      removeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.LAST_ETAG);
       return;
     }
-    writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.LAST_ETAG, String(etag));
+    writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.LAST_ETAG, String(etag));
   },
 
   /**
@@ -396,7 +474,7 @@ export const StorageService = {
       const data = JSON.parse(jsonStr);
       if (data.homeAddress) this.setHomeAddress(data.homeAddress);
       if (Array.isArray(data.savedPlaces)) {
-        writeWorkingCopy(this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
+        writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
       }
       return true;
     } catch (e) {

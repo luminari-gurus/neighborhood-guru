@@ -16,6 +16,7 @@ import {
   LEGACY_WORKING_COPY_KEYS,
   StorageService,
   WORKING_COPY_KEYS,
+  authenticatedWorkingCopyKey,
   isDemoPlace,
   isUserAuthoredWorkingCopy,
   workingCopyKey,
@@ -168,7 +169,7 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBeNull();
   });
 
-  test('does not overwrite an existing namespaced working copy during migration', () => {
+  test('does not overwrite an existing namespaced working copy and keeps divergent leftover keys', () => {
     StorageService.setOwner(ANONYMOUS_OWNER_ID);
     StorageService.setHomeAddress({ name: 'Already migrated', lat: 1, lng: 1 });
     localStorage.setItem(
@@ -179,7 +180,7 @@ describe('namespaced browser storage', () => {
     StorageService.setOwner(ANONYMOUS_OWNER_ID);
 
     expect(StorageService.getHomeAddress().name).toBe('Already migrated');
-    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe('Stale leftover');
   });
 
   test('reading working-copy keys before setOwner migrates legacy data instead of seeding over it', () => {
@@ -302,6 +303,156 @@ describe('namespaced browser storage', () => {
 
     StorageService.setOwner(null);
     expect(StorageService.getHomeAddress().name).toBe('Anonymous home');
+  });
+
+  test('authenticated keys use a user tag so user.id anonymous cannot collide', () => {
+    StorageService.setOwner('anonymous');
+    StorageService.setHomeAddress({ name: 'Named user anonymous', lat: 1, lng: 1 });
+    expect(StorageService.getNamespaceId()).toBe('user:anonymous');
+    expect(StorageService.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)).toBe(
+      authenticatedWorkingCopyKey('anonymous', WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+
+    StorageService.setOwner(null);
+    expect(StorageService.getNamespaceId()).toBe(ANONYMOUS_OWNER_ID);
+    expect(StorageService.getHomeAddress()).toBeNull();
+    expect(StorageService.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)).toBe(
+      workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+  });
+
+  test('opaque user ids are encoded without trimming so distinct ids stay distinct', () => {
+    StorageService.setOwner(' ada ');
+    StorageService.setHomeAddress({ name: 'Padded', lat: 1, lng: 1 });
+    StorageService.setOwner('ada');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    StorageService.setOwner(' ada ');
+    expect(StorageService.getHomeAddress().name).toBe('Padded');
+    expect(StorageService.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)).toContain(encodeURIComponent(' ada '));
+  });
+
+  test('malformed home JSON yields an empty home instead of throwing', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    localStorage.setItem(
+      StorageService.workingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+      '{not-json',
+    );
+    expect(StorageService.getHomeAddress()).toBeNull();
+  });
+
+  test('malformed places JSON yields an empty list instead of seeding over it', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    localStorage.setItem(
+      StorageService.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES),
+      '{not-json',
+    );
+    expect(StorageService.getSavedPlaces()).toEqual([]);
+    expect(localStorage.getItem(StorageService.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES))).toBe('{not-json');
+  });
+
+  test('identical leftover legacy keys are removed after migration', () => {
+    const home = { name: 'Same', lat: 1, lng: 2 };
+    StorageService.setOwner(null);
+    StorageService.setHomeAddress(home);
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(home));
+    StorageService.setOwner(null);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(StorageService.getHomeAddress()).toEqual(home);
+  });
+
+  test('demo destination plus divergent legacy leftover is preserved not deleted', () => {
+    StorageService.setOwner(null);
+    const seeded = StorageService.getSavedPlaces();
+    expect(seeded.every(isDemoPlace)).toBe(true);
+    const leftover = [userPlace({ name: 'Older tab cafe' })];
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify(leftover));
+    StorageService.setOwner(null);
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places))).toEqual(leftover);
+    expect(StorageService.getSavedPlaces().every(isDemoPlace)).toBe(true);
+  });
+
+  test('partial migration copies missing keys and keeps divergent keys', () => {
+    const destHome = { name: 'Already migrated home', lat: 1, lng: 1 };
+    const leftoverHome = { name: 'Older tab home', lat: 9, lng: 9 };
+    const leftoverPlaces = [userPlace({ name: 'Older tab cafe' })];
+    StorageService.setOwner(null);
+    StorageService.setHomeAddress(destHome);
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(leftoverHome));
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify(leftoverPlaces));
+
+    StorageService.setOwner(null);
+
+    expect(StorageService.getHomeAddress()).toEqual(destHome);
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address))).toEqual(leftoverHome);
+    expect(StorageService.getSavedPlaces()).toEqual(leftoverPlaces);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
+  });
+
+  test('malformed destination JSON does not delete a valid leftover legacy key', () => {
+    StorageService.setOwner(null);
+    localStorage.setItem(
+      workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS),
+      '{not-json',
+    );
+    const leftover = { name: 'Older tab home', lat: 2, lng: 2 };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(leftover));
+
+    StorageService.setOwner(null);
+
+    expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBe('{not-json');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address))).toEqual(leftover);
+  });
+
+  test('empty destination values are treated as present and divergent leftover is kept', () => {
+    StorageService.setOwner(null);
+    localStorage.setItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS), '');
+    localStorage.setItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.SAVED_PLACES), '[]');
+    const leftoverHome = { name: 'Older tab home', lat: 3, lng: 3 };
+    const leftoverPlaces = [userPlace({ name: 'Older tab leftover' })];
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(leftoverHome));
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify(leftoverPlaces));
+
+    StorageService.setOwner(null);
+
+    expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBe('');
+    expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.SAVED_PLACES))).toBe('[]');
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address))).toEqual(leftoverHome);
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places))).toEqual(leftoverPlaces);
+  });
+
+  test('older-tab write after dest exists is preserved on a later migrate pass', () => {
+    StorageService.setOwner(null);
+    StorageService.setHomeAddress({ name: 'Current dest', lat: 1, lng: 1 });
+    StorageService.setOwner(null);
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+
+    localStorage.setItem(
+      LEGACY_WORKING_COPY_KEYS.home_address,
+      JSON.stringify({ name: 'Newer leftover from older tab', lat: 8, lng: 8 }),
+    );
+    StorageService.setHomeAddress({ name: 'Current dest', lat: 1, lng: 1 });
+
+    expect(StorageService.getHomeAddress().name).toBe('Current dest');
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe(
+      'Newer leftover from older tab',
+    );
+  });
+
+  test('editing a demo seed converts it into user-authored data', () => {
+    const seeded = StorageService.getSavedPlaces();
+    const demo = seeded.find((place) => place.id === 'demo-1');
+    const remainingDemo = StorageService.savePlace({
+      ...demo,
+      notes: 'my private alarm code',
+    });
+    const edited = remainingDemo.find((place) => place.notes === 'my private alarm code');
+    expect(edited).toBeTruthy();
+    expect(isDemoPlace(edited)).toBe(false);
+    expect(edited.id).not.toBe('demo-1');
+    expect(edited.source).toBeUndefined();
+    expect(remainingDemo.some((place) => place.id === 'demo-2' && isDemoPlace(place))).toBe(true);
+    expect(isUserAuthoredWorkingCopy({ savedPlaces: remainingDemo })).toBe(true);
   });
 });
 
@@ -512,6 +663,33 @@ describe('working-copy bind and login I/O', () => {
     expect(auth.getState().status).toBe(AUTH_STATUS.ERROR);
     expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
     expect(StorageService.getHomeAddress().name).toBe('Keep me');
+
+    auth.dispose();
+  });
+
+  test('production order initializes auth before binding the working copy', async () => {
+    const client = new FakeAuthClient({ session: SESSION_A });
+    const auth = createAuthState(client);
+    await auth.initialize();
+    expect(auth.getState().status).toBe(AUTH_STATUS.AUTHENTICATED);
+
+    bindNeighborhoodWorkingCopy(auth, StorageService);
+    expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
+    expect(StorageService.getNamespaceId()).toBe(`user:${SESSION_A.user.id}`);
+
+    auth.dispose();
+  });
+
+  test('unsubscribing the working-copy bind ignores later session changes', async () => {
+    const client = new FakeAuthClient({ session: SESSION_A });
+    const auth = createAuthState(client);
+    const unsubscribe = bindNeighborhoodWorkingCopy(auth, StorageService);
+    await auth.initialize();
+    expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
+
+    unsubscribe();
+    await auth.signOut();
+    expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
 
     auth.dispose();
   });
