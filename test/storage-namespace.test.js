@@ -296,6 +296,21 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeString();
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeString();
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBeString();
+    expect(StorageService.legacyMigrationStatus()).toMatchObject({
+      leftoverPresent: true,
+      leftoverUnapplied: false,
+    });
+  });
+
+  test('exclusive home-only leftover migrate still seeds dest places', async () => {
+    localStorage.setItem(
+      LEGACY_WORKING_COPY_KEYS.home_address,
+      JSON.stringify({ name: 'Only home', lat: 1, lng: 1 }),
+    );
+    await bootstrapOwner(null);
+    expect(StorageService.getHomeAddress().name).toBe('Only home');
+    expect(StorageService.legacyMigrationStatus().leftoverUnapplied).toBe(false);
+    expect(StorageService.getSavedPlaces().every(isDemoPlace)).toBe(true);
   });
 
   test('migrates unprefixed keys into the restored sole-user namespace', async () => {
@@ -1314,7 +1329,10 @@ describe('namespaced browser storage', () => {
       expect(StorageService.getHomeAddress()).toBeNull();
       expect(StorageService.getSavedPlaces()).toEqual([]);
       expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe('unscoped leftover');
-      expect(StorageService.legacyMigrationStatus().leftoverPresent).toBe(true);
+      expect(StorageService.legacyMigrationStatus()).toMatchObject({
+        leftoverPresent: true,
+        leftoverUnapplied: true,
+      });
       const device = JSON.parse(StorageService.exportDeviceRecoveryJSON());
       expect(device.pendingLegacyWorkingCopies.some((item) => item.preview?.homeName === 'unscoped leftover')).toBe(true);
     } finally {

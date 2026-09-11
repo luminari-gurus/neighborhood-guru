@@ -1025,19 +1025,19 @@ export class UIController {
     const message = this.elements.legacyRecoveryMessage;
     const restoreBtn = this.elements.restoreLegacyBtn;
     if (!banner) return;
-    const leftoverPresent = Boolean(status.leftoverPresent);
+    const leftoverUnapplied = Boolean(status.leftoverUnapplied);
     const ownerOrphans = Array.isArray(status.ownerOrphans) ? status.ownerOrphans.length : 0;
     const deviceOrphans = Array.isArray(status.deviceOrphans) ? status.deviceOrphans.length : 0;
-    const needsAttention = leftoverPresent || ownerOrphans > 0 || deviceOrphans > 0;
+    const needsAttention = leftoverUnapplied || ownerOrphans > 0 || deviceOrphans > 0;
     if (!needsAttention) {
       banner.classList.add('hidden');
       return;
     }
     banner.classList.remove('hidden');
     const parts = [];
-    if (leftoverPresent && !status.locksAvailable) {
+    if (leftoverUnapplied && !status.locksAvailable) {
       parts.push('Previous neighborhood data is still on this device and was not applied automatically (this browser cannot take a Web Lock).');
-    } else if (leftoverPresent) {
+    } else if (leftoverUnapplied) {
       parts.push('Previous neighborhood data is still on this device. Restore it into this account or download a recovery file.');
     }
     if (ownerOrphans > 0) {
@@ -1048,8 +1048,8 @@ export class UIController {
     }
     if (message) message.textContent = parts.join(' ');
     if (restoreBtn) {
-      restoreBtn.classList.toggle('hidden', !leftoverPresent);
-      restoreBtn.disabled = leftoverPresent && !status.locksAvailable;
+      restoreBtn.classList.toggle('hidden', !leftoverUnapplied);
+      restoreBtn.disabled = leftoverUnapplied && !status.locksAvailable;
     }
   }
 

@@ -1147,6 +1147,36 @@ describe('owner-switch presentation isolation', () => {
     });
   });
 
+  test('legacy recovery banner shows only unapplied leftover', () => {
+    const ui = new UIController();
+    const classes = new Set(['hidden']);
+    const restoreClasses = new Set();
+    ui.elements.legacyRecoveryBanner = {
+      classList: {
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+      },
+    };
+    ui.elements.legacyRecoveryMessage = { textContent: '' };
+    ui.elements.restoreLegacyBtn = {
+      disabled: false,
+      classList: {
+        toggle(name, force) {
+          if (force) restoreClasses.add(name);
+          else restoreClasses.delete(name);
+        },
+      },
+    };
+
+    ui.updateLegacyRecoveryBanner({ leftoverPresent: true, leftoverUnapplied: false, locksAvailable: true });
+    expect(classes.has('hidden')).toBe(true);
+
+    ui.updateLegacyRecoveryBanner({ leftoverPresent: true, leftoverUnapplied: true, locksAvailable: false });
+    expect(classes.has('hidden')).toBe(false);
+    expect(ui.elements.legacyRecoveryMessage.textContent).toContain('cannot take a Web Lock');
+    expect(ui.elements.restoreLegacyBtn.disabled).toBe(true);
+  });
+
   test('reopening a Mapbox popup does not stack edit handlers', async () => {
     const { MapboxService } = await import('../src/js/mapbox-service.js');
     const service = new MapboxService();

@@ -170,7 +170,7 @@ export class NeighborhoodGuruApp {
     if (this.disposed) return;
     const status = typeof this.storage.legacyMigrationStatus === 'function'
       ? this.storage.legacyMigrationStatus()
-      : { leftoverPresent: false, locksAvailable: true, leftovers: [], ownerOrphans: [], deviceOrphans: [] };
+      : { leftoverPresent: false, leftoverUnapplied: false, locksAvailable: true, leftovers: [], ownerOrphans: [], deviceOrphans: [] };
     this.ui.updateLegacyRecoveryBanner?.(status);
   }
 

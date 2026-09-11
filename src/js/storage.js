@@ -480,8 +480,19 @@ function deviceQuarantineLegacyValue(suffix, value) {
   return quarantineLegacyValue(suffix, value, null);
 }
 
-function unprefixedLeftoverPresent() {
-  return Object.values(LEGACY_WORKING_COPY_KEYS).some((legacyKey) => readItem(legacyKey) != null);
+/**
+ * True when leftover exists for a suffix whose destination is still empty.
+ * After exclusive copy the unprefixed key is retained, but dest is populated
+ * so demos may seed and the recovery banner should not nag restore.
+ */
+function leftoverUnappliedForOwner(anonymous, ownerId) {
+  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+    const leftover = readItem(legacyKey);
+    if (leftover == null) continue;
+    const dest = readItem(namespaceKey(anonymous, ownerId, suffix));
+    if (dest == null) return true;
+  }
+  return false;
 }
 
 /**
@@ -894,8 +905,10 @@ export const StorageService = {
 
   legacyMigrationStatus() {
     const leftovers = listUnprefixedLeftovers();
+    const leftoverUnapplied = leftoverUnappliedForOwner(this._anonymous, this._ownerId);
     return {
       leftoverPresent: leftovers.length > 0,
+      leftoverUnapplied,
       locksAvailable: webMigrationLocksAvailable(),
       leftovers,
       ownerOrphans: this.listOrphanedWorkingCopies(),
@@ -970,7 +983,7 @@ export const StorageService = {
   getSavedPlaces() {
     const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
     if (!raw) {
-      if (unprefixedLeftoverPresent()) return [];
+      if (leftoverUnappliedForOwner(this._anonymous, this._ownerId)) return [];
       const seeded = clonePlaces(DEMO_PLACES);
       writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
       return seeded;
