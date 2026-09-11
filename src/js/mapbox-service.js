@@ -502,11 +502,11 @@ export class MapboxService {
       if (this.tornDown) return;
       const addBtn = popup.getElement().querySelector('.temp-add-btn');
       if (addBtn && onTempMarkerClick) {
-        addBtn.addEventListener('click', () => {
+        addBtn.onclick = () => {
           if (this.tornDown) return;
           onTempMarkerClick(coords);
           popup.remove();
-        });
+        };
       }
     });
   }
@@ -623,18 +623,20 @@ export class MapboxService {
       // Handle Edit button click & async shows fetching inside popup
       popup.on('open', async () => {
         if (this.tornDown) return;
-        const editBtn = popup.getElement().querySelector('.popup-edit-btn');
+        const root = popup.getElement();
+        if (!root) return;
+        const editBtn = root.querySelector('.popup-edit-btn');
         if (editBtn && onMarkerClick) {
-          editBtn.addEventListener('click', () => {
+          editBtn.onclick = () => {
             if (this.tornDown) return;
             onMarkerClick(place);
             popup.remove();
-          });
+          };
         }
 
         if (jbId) {
-          const showsBody = popup.getElement().querySelector(`#popup-jb-shows-${place.id} .jb-popup-shows-body`);
-          const refreshBtn = popup.getElement().querySelector(`#popup-jb-shows-${place.id} .popup-refresh-jb-btn`);
+          const showsBody = root.querySelector(`#popup-jb-shows-${place.id} .jb-popup-shows-body`);
+          const refreshBtn = root.querySelector(`#popup-jb-shows-${place.id} .popup-refresh-jb-btn`);
 
           const renderShows = async (force = false) => {
             if (this.tornDown || !showsBody) return;
@@ -656,11 +658,11 @@ export class MapboxService {
           renderShows(false);
 
           if (refreshBtn) {
-            refreshBtn.addEventListener('click', (e) => {
+            refreshBtn.onclick = (e) => {
               e.stopPropagation();
               if (this.tornDown) return;
               renderShows(true);
-            });
+            };
           }
         }
       });

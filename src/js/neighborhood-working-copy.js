@@ -41,6 +41,21 @@ export function bindNeighborhoodWorkingCopy(
   let currentNamespaceId = storage.getNamespaceId?.() ?? storage.getOwnerId();
   let applyGeneration = 0;
   let latestReady = Promise.resolve();
+  let stopped = false;
+
+  const waitUntilIdle = async () => {
+    while (!stopped) {
+      const token = applyGeneration;
+      const namespaceId = currentNamespaceId;
+      const pending = latestReady;
+      await pending;
+      if (stopped) return currentNamespaceId;
+      if (token === applyGeneration && namespaceId === currentNamespaceId && latestReady === pending) {
+        return currentNamespaceId;
+      }
+    }
+    return currentNamespaceId;
+  };
 
   const apply = (state) => {
     const nextOwnerId = ownerIdFromAuthState(state);
@@ -66,24 +81,36 @@ export function bindNeighborhoodWorkingCopy(
       ? storage.ensureLegacyMigratedAsync()
       : Promise.resolve();
     latestReady = Promise.resolve(migrate).then(() => {
-      if (token !== applyGeneration) return namespaceId;
+      if (stopped || token !== applyGeneration) return namespaceId;
       try {
         onOwnerReady?.(storage.getOwnerId());
       } catch {
         // Destination is already migrated. Listener failures stay isolated.
       }
       return namespaceId;
-    }).catch(() => namespaceId);
+    }, () => {
+      if (stopped || token !== applyGeneration) return namespaceId;
+      try {
+        onOwnerReady?.(storage.getOwnerId());
+      } catch {
+        // Lock rejection still notifies the current owner generation once.
+      }
+      return namespaceId;
+    });
     return namespaceId;
   };
 
   apply(auth.getState());
   const unsubscribe = auth.subscribe(apply);
-  const stop = () => unsubscribe();
+  const stop = () => {
+    stopped = true;
+    applyGeneration += 1;
+    unsubscribe();
+  };
   Object.defineProperty(stop, 'ready', {
     configurable: true,
     get() {
-      return latestReady;
+      return waitUntilIdle();
     },
   });
   return stop;

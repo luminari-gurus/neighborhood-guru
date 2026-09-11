@@ -439,22 +439,34 @@ function parseOrphanEnvelope(stored) {
  * Move a leftover off the adoptable unprefixed key. The envelope stamps the
  * claiming namespace so another account cannot preview/restore it.
  */
+function writeItemVerified(key, value) {
+  writeItem(key, value);
+  return readItem(key) === value;
+}
+
 function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId) {
   const primary = orphanedWorkingCopyKey(suffix);
   const existing = readItem(primary);
-  if (existing == null) {
-    writeItem(primary, envelope);
-    return readItem(primary) === envelope;
+  migrationInterleave('after-orphan-absent-read', {
+    suffix,
+    primary,
+    absent: existing == null,
+  });
+  const existingNow = readItem(primary);
+  if (existingNow == null) {
+    if (!writeItemVerified(primary, envelope)) return false;
+    return true;
   }
-  const existingParsed = parseOrphanEnvelope(existing);
+  const existingParsed = parseOrphanEnvelope(existingNow);
   if (existingParsed.raw === incomingRaw && existingParsed.namespaceId === incomingNamespaceId) {
     return true;
   }
   for (let i = 0; i < 24; i += 1) {
     const candidate = orphanedWorkingCopyKey(suffix, `${mintNonce()}-${i}`);
     if (readItem(candidate) != null) continue;
-    writeItem(candidate, envelope);
-    if (readItem(candidate) === envelope) return true;
+    migrationInterleave('after-orphan-overflow-absent-read', { suffix, candidate });
+    if (readItem(candidate) != null) continue;
+    if (writeItemVerified(candidate, envelope)) return true;
   }
   return false;
 }
@@ -473,85 +485,38 @@ function unprefixedLeftoverPresent() {
 }
 
 /**
- * Re-read the source immediately before removal. Delete only if it still
- * equals the copied/quarantined snapshot *and* the claim nonce still holds.
+ * Leftover unprefixed keys are retained while older writers may still exist.
+ * Claim provenance blocks cross-owner adoption. A newer leftover value is
+ * copied into orphan recovery, but the unprefixed key is never deleted here.
  */
-function removeLegacyIfUnchanged(legacyKey, expected, suffix, namespaceId, nonce, depth = 0) {
-  if (depth > 8) return false;
+function retainLegacyIfClaimHeld(legacyKey, expected, suffix, namespaceId, nonce) {
   migrationInterleave('before-remove', { suffix, namespaceId, nonce, expected });
   if (nonce && !claimStillHeld(suffix, nonce, namespaceId)) return false;
   const latest = readItem(legacyKey);
-  if (latest == null) return true;
-  if (!matchesCopiedValue(latest, expected)) {
-    if (!quarantineLegacyValue(suffix, latest, namespaceId)) return false;
-    return removeLegacyIfUnchanged(legacyKey, latest, suffix, namespaceId, nonce, depth + 1);
+  if (latest != null && !matchesCopiedValue(latest, expected)) {
+    quarantineLegacyValue(suffix, latest, namespaceId);
   }
-  try {
-    removeItem(legacyKey);
-  } catch {
-    return false;
-  }
-  const after = readItem(legacyKey);
-  if (after == null) return true;
-  if (!matchesCopiedValue(after, expected)) {
-    if (!quarantineLegacyValue(suffix, after, namespaceId)) return false;
-    return removeLegacyIfUnchanged(legacyKey, after, suffix, namespaceId, nonce, depth + 1);
-  }
-  return false;
+  return !nonce || claimStillHeld(suffix, nonce, namespaceId);
 }
 
 let exclusiveMigrationDepth = 0;
+let mutationLockDepth = 0;
 
-function runFailClosedLegacyMigration(anonymous, ownerId) {
-  const namespaceId = namespaceIdFor(anonymous, ownerId);
-  const locksAvailable = webMigrationLocksAvailable();
-  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
-    try {
-      const leftover = readItem(legacyKey);
-      if (leftover == null) continue;
-      const inspected = inspectMigrationClaim(suffix);
-      if (inspected.kind === 'invalid') continue;
-      if (inspected.kind === 'valid' && inspected.claim.namespaceId !== namespaceId) continue;
-      if (inspected.kind === 'valid' && isPendingMatchingClaim(inspected.claim, namespaceId, leftover)) continue;
-
-      const completedOrMismatched = inspected.kind === 'valid';
-      const absentWithoutLocks = inspected.kind === 'absent' && !locksAvailable;
-      if (!completedOrMismatched && !absentWithoutLocks) continue;
-
-      if (!deviceQuarantineLegacyValue(suffix, leftover)) continue;
-      if (!matchesCopiedValue(readItem(legacyKey), leftover)) continue;
-      try {
-        removeItem(legacyKey);
-      } catch {
-        // Leftover stays until exclusive recovery or a later fail-closed pass.
-      }
-    } catch {
-      // Fail closed: never copy into the active namespace without a Web Lock.
-    }
-  }
+function runFailClosedLegacyMigration(_anonymous, _ownerId) {
+  // Unlocked / synchronous path: never copy into a namespace, never delete
+  // leftover, never hide it in device recovery. Exclusive adoption requires
+  // a held Web Lock. Existing users keep the unprefixed record.
+  void _anonymous;
+  void _ownerId;
 }
 
 /**
  * Owner flipped between scheduling migration and receiving the Web Lock.
- * Never copy into the live (or snapshot) namespace; leftover becomes
- * unowned device recovery so the new owner cannot adopt it.
+ * Do not copy into the live owner. Leftover stays on the unprefixed key.
  */
 function runOwnerMismatchFailClosed() {
-  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
-    try {
-      const leftover = readItem(legacyKey);
-      if (leftover == null) continue;
-      if (!deviceQuarantineLegacyValue(suffix, leftover)) continue;
-      if (!matchesCopiedValue(readItem(legacyKey), leftover)) continue;
-      try {
-        removeItem(legacyKey);
-      } catch {
-        // Quarantine already makes the leftover non-adoptable.
-      }
-    } catch {
-      // Skip copy into whichever owner happens to be live.
-    }
-  }
+  // Intentionally empty: deleting or device-quarantining leftover can hide
+  // a newer uncoordinated write and reset existing users.
 }
 
 function runExclusiveLegacyMigration(anonymous, ownerId) {
@@ -576,27 +541,11 @@ function runExclusiveLegacyMigration(anonymous, ownerId) {
         }
 
         if (inspected.kind === 'valid' && !isPendingMatchingClaim(inspected.claim, namespaceId, copied)) {
-          if (deviceQuarantineLegacyValue(suffix, copied) && matchesCopiedValue(readItem(legacyKey), copied)) {
-            try {
-              removeItem(legacyKey);
-            } catch {
-              // Claim remains completed; leftover is no longer adoptable once quarantined.
-            }
-          }
           continue;
         }
 
         const acquired = tryAcquireClaim(suffix, namespaceId, copied);
         if (!acquired.ok) {
-          if (acquired.reason === 'completed' || acquired.reason === 'fingerprint-mismatch') {
-            if (deviceQuarantineLegacyValue(suffix, copied) && matchesCopiedValue(readItem(legacyKey), copied)) {
-              try {
-                removeItem(legacyKey);
-              } catch {
-                // Keep leftover if quarantine/remove failed.
-              }
-            }
-          }
           continue;
         }
 
@@ -613,7 +562,7 @@ function runExclusiveLegacyMigration(anonymous, ownerId) {
 
         if (!matchesCopiedValue(sourceNow, copied)) {
           if (deviceQuarantineLegacyValue(suffix, sourceNow)
-            && removeLegacyIfUnchanged(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
+            && retainLegacyIfClaimHeld(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
             updateHeldClaim(suffix, nonce, namespaceId, { status: 'orphaned', fingerprint: copied });
           }
           continue;
@@ -631,7 +580,7 @@ function runExclusiveLegacyMigration(anonymous, ownerId) {
 
         const destMatches = destNow != null && matchesCopiedValue(destNow, sourceNow);
         if (destMatches) {
-          if (removeLegacyIfUnchanged(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
+          if (retainLegacyIfClaimHeld(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
             updateHeldClaim(suffix, nonce, namespaceId, { status: 'migrated', fingerprint: sourceNow });
           }
           continue;
@@ -641,7 +590,7 @@ function runExclusiveLegacyMigration(anonymous, ownerId) {
 
         if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
         if (quarantineLegacyValue(suffix, sourceNow, namespaceId)
-          && removeLegacyIfUnchanged(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
+          && retainLegacyIfClaimHeld(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
           updateHeldClaim(suffix, nonce, namespaceId, { status: 'orphaned', fingerprint: sourceNow });
         }
       } catch {
@@ -656,7 +605,7 @@ function runExclusiveLegacyMigration(anonymous, ownerId) {
 /**
  * One-time local bootstrap of unprefixed keys. Exclusive adoption runs only
  * while holding `navigator.locks`. The synchronous path never copies into the
- * active namespace; without Web Locks it fail-closes into device-level recovery.
+ * active namespace and never deletes leftover.
  */
 function migrateLegacyWorkingCopy(anonymous, ownerId) {
   if (exclusiveMigrationDepth > 0) {
@@ -668,9 +617,123 @@ function migrateLegacyWorkingCopy(anonymous, ownerId) {
 export async function withLegacyMigrationWebLock(fn) {
   const locks = globalThis.navigator?.locks;
   if (locks && typeof locks.request === 'function') {
-    return locks.request(LEGACY_MIGRATION_LOCK_NAME, { mode: 'exclusive' }, () => fn());
+    try {
+      return await Promise.resolve(
+        locks.request(LEGACY_MIGRATION_LOCK_NAME, { mode: 'exclusive' }, () => fn()),
+      );
+    } catch {
+      return { lockRejected: true };
+    }
   }
-  return fn();
+  return { lockUnavailable: true };
+}
+
+async function withMutationWebLock(fn) {
+  if (mutationLockDepth > 0 || exclusiveMigrationDepth > 0) {
+    return fn();
+  }
+  if (!webMigrationLocksAvailable()) {
+    const error = new Error('mutation-lock-unavailable');
+    error.code = 'mutation-lock-unavailable';
+    throw error;
+  }
+  const result = await withLegacyMigrationWebLock(() => {
+    mutationLockDepth += 1;
+    try {
+      return fn();
+    } finally {
+      mutationLockDepth -= 1;
+    }
+  });
+  if (result && (result.lockRejected || result.lockUnavailable)) {
+    const error = new Error(result.lockRejected ? 'mutation-lock-rejected' : 'mutation-lock-unavailable');
+    error.code = result.lockRejected ? 'mutation-lock-rejected' : 'mutation-lock-unavailable';
+    throw error;
+  }
+  return result;
+}
+
+function snapshotAllStorage() {
+  const snap = {};
+  for (const key of listStorageKeys()) {
+    snap[key] = readItem(key);
+  }
+  return snap;
+}
+
+function restoreAllStorage(snap) {
+  for (const key of listStorageKeys()) {
+    if (!Object.prototype.hasOwnProperty.call(snap, key)) {
+      try {
+        removeItem(key);
+      } catch {
+        // Best-effort rollback.
+      }
+    }
+  }
+  for (const [key, value] of Object.entries(snap)) {
+    try {
+      if (value == null) removeItem(key);
+      else writeItem(key, value);
+    } catch {
+      // Best-effort rollback.
+    }
+  }
+}
+
+function storageMatchesSnapshot(snap) {
+  const now = snapshotAllStorage();
+  const keys = new Set([...Object.keys(now), ...Object.keys(snap)]);
+  for (const key of keys) {
+    if (now[key] !== snap[key]) return false;
+  }
+  return true;
+}
+
+function leftoverPreview(suffix, raw) {
+  if (suffix === WORKING_COPY_KEYS.HOME_ADDRESS) {
+    const parsed = parseJsonOr(raw, null);
+    const home = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    return {
+      homeAddress: home,
+      savedPlaces: null,
+      preview: { homeName: home?.name ?? null, placeNames: [], placeCount: 0 },
+    };
+  }
+  if (suffix === WORKING_COPY_KEYS.SAVED_PLACES) {
+    const parsed = parseJsonOr(raw, null);
+    const places = Array.isArray(parsed) ? parsed : null;
+    return {
+      homeAddress: null,
+      savedPlaces: places,
+      preview: {
+        homeName: null,
+        placeNames: Array.isArray(places) ? places.map((place) => place?.name).filter(Boolean) : [],
+        placeCount: Array.isArray(places) ? places.length : 0,
+      },
+    };
+  }
+  return {
+    homeAddress: null,
+    savedPlaces: null,
+    preview: { homeName: null, placeNames: [], placeCount: 0 },
+  };
+}
+
+function listUnprefixedLeftovers() {
+  return Object.entries(LEGACY_WORKING_COPY_KEYS).map(([suffix, legacyKey]) => {
+    const raw = readItem(legacyKey);
+    if (raw == null) return null;
+    const inspected = inspectMigrationClaim(suffix);
+    return {
+      key: legacyKey,
+      suffix,
+      raw,
+      claimKind: inspected.kind,
+      claim: inspected.kind === 'valid' ? inspected.claim : null,
+      ...leftoverPreview(suffix, raw),
+    };
+  }).filter(Boolean);
 }
 
 function orphanSuffixFromKey(key) {
@@ -815,13 +878,29 @@ export const StorageService = {
         const liveNamespaceId = namespaceIdFor(this._anonymous, this._ownerId);
         if (liveNamespaceId !== namespaceId) {
           runOwnerMismatchFailClosed();
-          return;
+          return { ok: true };
         }
         runExclusiveLegacyMigration(anonymous, ownerId);
+        return { ok: true };
       });
       return;
     }
     runFailClosedLegacyMigration(anonymous, ownerId);
+  },
+
+  listPendingLegacyWorkingCopies() {
+    return listUnprefixedLeftovers();
+  },
+
+  legacyMigrationStatus() {
+    const leftovers = listUnprefixedLeftovers();
+    return {
+      leftoverPresent: leftovers.length > 0,
+      locksAvailable: webMigrationLocksAvailable(),
+      leftovers,
+      ownerOrphans: this.listOrphanedWorkingCopies(),
+      deviceOrphans: this.listDeviceOrphanedWorkingCopies(),
+    };
   },
 
   /**
@@ -1131,54 +1210,116 @@ export const StorageService = {
       kind: 'device-recovery',
       exportedAt: new Date().toISOString(),
       warning: 'These records are not bound to the signed-in account. Review before restoring.',
+      pendingLegacyWorkingCopies: this.listPendingLegacyWorkingCopies(),
       deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
     }, null, 2);
   },
 
-  importDataJSON(jsonStr) {
+  async importDataJSON(jsonStr) {
+    let data;
     try {
-      const data = JSON.parse(jsonStr);
-      if (data.homeAddress) this.setHomeAddress(data.homeAddress);
-      if (Array.isArray(data.savedPlaces)) {
-        writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
-      }
-      const namespaceId = this.getNamespaceId();
-      const orphans = Array.isArray(data.orphanedWorkingCopies) ? data.orphanedWorkingCopies : [];
-      let orphansOk = true;
-      for (const orphan of orphans) {
-        if (!orphan || typeof orphan !== 'object') continue;
-        let raw = null;
-        if (typeof orphan.raw === 'string') {
-          raw = orphan.raw;
-        } else if (orphan.homeAddress && typeof orphan.homeAddress === 'object' && !Array.isArray(orphan.homeAddress)) {
-          raw = JSON.stringify(orphan.homeAddress);
-        } else if (Array.isArray(orphan.savedPlaces)) {
-          raw = JSON.stringify(orphan.savedPlaces);
-        }
-        if (raw == null) continue;
-        const suffix = typeof orphan.suffix === 'string'
-          ? orphan.suffix
-          : (typeof orphan.key === 'string' && isOrphanedWorkingCopyKey(orphan.key)
-            ? orphanSuffixFromKey(orphan.key).suffix
-            : null);
-        if (!suffix) continue;
-        const envelope = wrapOrphanEnvelope(suffix, raw, namespaceId, orphan.recoveredFrom || 'legacy-conflict');
-        const preferredKey = typeof orphan.key === 'string' && isOrphanedWorkingCopyKey(orphan.key)
-          ? orphan.key
-          : orphanedWorkingCopyKey(suffix);
-        const existing = readItem(preferredKey);
-        if (existing == null) {
-          writeItem(preferredKey, envelope);
-          if (readItem(preferredKey) !== envelope) orphansOk = false;
-          continue;
-        }
-        const existingParsed = parseOrphanEnvelope(existing);
-        if (existingParsed.raw === raw && existingParsed.namespaceId === namespaceId) continue;
-        if (!writeOrphanEnvelope(suffix, envelope, raw, namespaceId)) orphansOk = false;
-      }
-      return orphansOk;
+      data = JSON.parse(jsonStr);
     } catch (e) {
       console.error('Failed to parse import JSON', e);
+      return false;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+    if (data.homeAddress != null && (typeof data.homeAddress !== 'object' || Array.isArray(data.homeAddress))) {
+      return false;
+    }
+    if (data.savedPlaces != null && !Array.isArray(data.savedPlaces)) return false;
+
+    const preparedOrphans = [];
+    const orphans = Array.isArray(data.orphanedWorkingCopies) ? data.orphanedWorkingCopies : [];
+    for (const orphan of orphans) {
+      if (!orphan || typeof orphan !== 'object') continue;
+      let raw = null;
+      if (typeof orphan.raw === 'string') {
+        raw = orphan.raw;
+      } else if (orphan.homeAddress && typeof orphan.homeAddress === 'object' && !Array.isArray(orphan.homeAddress)) {
+        raw = JSON.stringify(orphan.homeAddress);
+      } else if (Array.isArray(orphan.savedPlaces)) {
+        raw = JSON.stringify(orphan.savedPlaces);
+      }
+      if (raw == null) continue;
+      const suffix = typeof orphan.suffix === 'string'
+        ? orphan.suffix
+        : (typeof orphan.key === 'string' && isOrphanedWorkingCopyKey(orphan.key)
+          ? orphanSuffixFromKey(orphan.key).suffix
+          : null);
+      if (!suffix) continue;
+      const preferredKey = typeof orphan.key === 'string' && isOrphanedWorkingCopyKey(orphan.key)
+        ? orphan.key
+        : orphanedWorkingCopyKey(suffix);
+      preparedOrphans.push({
+        suffix,
+        raw,
+        preferredKey,
+        recoveredFrom: orphan.recoveredFrom || 'legacy-conflict',
+      });
+    }
+
+    try {
+      return await withMutationWebLock(() => {
+        const snapshot = snapshotAllStorage();
+        try {
+          const namespaceId = this.getNamespaceId();
+          if (data.homeAddress) {
+            const raw = JSON.stringify(data.homeAddress);
+            if (!writeItemVerified(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS), raw)) {
+              throw new Error('home-write-failed');
+            }
+          }
+          if (Array.isArray(data.savedPlaces)) {
+            const raw = JSON.stringify(data.savedPlaces);
+            if (!writeItemVerified(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES), raw)) {
+              throw new Error('places-write-failed');
+            }
+          }
+          for (const orphan of preparedOrphans) {
+            const envelope = wrapOrphanEnvelope(
+              orphan.suffix,
+              orphan.raw,
+              namespaceId,
+              orphan.recoveredFrom,
+            );
+            const existing = readItem(orphan.preferredKey);
+            if (existing == null) {
+              migrationInterleave('after-orphan-absent-read', {
+                suffix: orphan.suffix,
+                primary: orphan.preferredKey,
+                absent: true,
+              });
+              const existingNow = readItem(orphan.preferredKey);
+              if (existingNow == null) {
+                if (!writeItemVerified(orphan.preferredKey, envelope)) {
+                  throw new Error('orphan-write-failed');
+                }
+                continue;
+              }
+              const existingParsed = parseOrphanEnvelope(existingNow);
+              if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) {
+                continue;
+              }
+              if (!writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId)) {
+                throw new Error('orphan-write-failed');
+              }
+              continue;
+            }
+            const existingParsed = parseOrphanEnvelope(existing);
+            if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) continue;
+            if (!writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId)) {
+              throw new Error('orphan-write-failed');
+            }
+          }
+          return true;
+        } catch (e) {
+          restoreAllStorage(snapshot);
+          return false;
+        }
+      });
+    } catch (e) {
+      console.error('Failed to import JSON', e);
       return false;
     }
   }

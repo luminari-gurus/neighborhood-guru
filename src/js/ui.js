@@ -9,6 +9,14 @@ export class UIController {
     this.disposed = false;
     this.listeners = [];
     this.timeouts = [];
+    this._placesById = new Map();
+    this._onPlaceClick = null;
+    this._onEditClick = null;
+    this._onPoiImport = null;
+    this._discoveredPois = [];
+    this._jambaseMatches = [];
+    this._onJambaseSelect = null;
+    this._delegated = false;
   }
 
   listen(target, type, handler) {
@@ -50,10 +58,29 @@ export class UIController {
       }
     }
     this.timeouts = [];
+    this._onPlaceClick = null;
+    this._onEditClick = null;
+    this._onPoiImport = null;
+    this._onJambaseSelect = null;
+    this._placesById.clear();
+    this._discoveredPois = [];
+    this._jambaseMatches = [];
+    this.resetOwnerScopedPresentation?.();
+    try {
+      if (this.elements.savedPlacesList) this.elements.savedPlacesList.innerHTML = '';
+      if (this.elements.poiResultsContainer) this.elements.poiResultsContainer.innerHTML = '';
+      if (this.elements.jambasePickerResultsContainer) this.elements.jambasePickerResultsContainer.innerHTML = '';
+      if (this.elements.peopleListContainer) this.elements.peopleListContainer.innerHTML = '';
+      if (this.elements.contactMethodsContainer) this.elements.contactMethodsContainer.innerHTML = '';
+      if (this.elements.eventsListContainer) this.elements.eventsListContainer.innerHTML = '';
+    } catch {
+      // Nodes may already be gone.
+    }
   }
 
   init() {
     this.cacheElements();
+    this.bindDelegatedEvents();
     this.bindPeopleFieldEvents();
     this.bindContactFieldEvents();
     this.bindEventFieldEvents();
@@ -62,6 +89,112 @@ export class UIController {
       this.listen(this.elements.formCategory, 'change', () => {
         this.updateCategoryFields(this.elements.formCategory.value);
       });
+    }
+  }
+
+  bindDelegatedEvents() {
+    if (this._delegated) return;
+    this._delegated = true;
+    this.listen(this.elements.savedPlacesList, 'click', (e) => {
+      if (this.disposed) return;
+      const refreshBtn = e.target.closest('.card-refresh-jb-btn');
+      if (refreshBtn) {
+        e.stopPropagation();
+        const box = refreshBtn.closest('.jb-card-shows-box');
+        const jbId = box?.dataset?.jambaseId;
+        const listEl = box?.querySelector('.jb-card-shows-list');
+        if (!jbId || !listEl) return;
+        listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
+        JamBaseService.fetchUpcomingShows(jbId, true).then((shows) => {
+          if (this.disposed || !listEl.isConnected) return;
+          this.renderSidebarJamBaseShows(listEl, shows);
+        });
+        return;
+      }
+      if (e.target.closest('a')) {
+        e.stopPropagation();
+        return;
+      }
+      const editBtn = e.target.closest('.edit-place-btn');
+      const flyBtn = e.target.closest('.fly-place-btn');
+      const card = e.target.closest('.place-card');
+      const id = card?.dataset?.id;
+      const place = id ? this._placesById.get(id) : null;
+      if (!place) return;
+      if (editBtn) {
+        e.stopPropagation();
+        this._onEditClick?.(place);
+        return;
+      }
+      if (flyBtn) {
+        e.stopPropagation();
+        this._onPlaceClick?.(place);
+        return;
+      }
+      this._onPlaceClick?.(place);
+    });
+    this.listen(this.elements.poiResultsContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-import-single');
+      if (!btn) return;
+      const card = btn.closest('.poi-item-card');
+      const index = Number(card?.dataset?.index);
+      const poi = this._discoveredPois[index];
+      if (!poi) return;
+      this._onPoiImport?.(poi);
+      card.style.opacity = '0.5';
+      btn.textContent = '✓ Imported';
+      btn.disabled = true;
+    });
+    this.listen(this.elements.jambasePickerResultsContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-select-venue');
+      if (!btn) return;
+      const card = btn.closest('.poi-item-card');
+      const index = Number(card?.dataset?.index);
+      const venue = this._jambaseMatches[index];
+      if (!venue) return;
+      this._onJambaseSelect?.(venue);
+      this.closeJambasePickerModal();
+    });
+    this.listen(this.elements.peopleListContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-remove-row');
+      if (btn) btn.closest('.person-row')?.remove();
+    });
+    this.listen(this.elements.contactMethodsContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-remove-row');
+      if (btn) btn.closest('.contact-method-row')?.remove();
+    });
+    this.listen(this.elements.contactMethodsContainer, 'change', (e) => {
+      if (this.disposed) return;
+      const select = e.target.closest('.contact-type-select');
+      if (!select) return;
+      const row = select.closest('.contact-method-row');
+      const valueInput = row?.querySelector('.contact-value-input');
+      if (valueInput) {
+        valueInput.placeholder = select.value.startsWith('email') ? 'e.g. name@example.com' : 'e.g. (555) 000-0000';
+      }
+    });
+    this.listen(this.elements.eventsListContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-remove-row');
+      if (btn) btn.closest('.event-row')?.remove();
+    });
+  }
+
+  renderSidebarJamBaseShows(listEl, shows) {
+    if (this.disposed || !listEl) return;
+    if (shows && shows.length > 0) {
+      listEl.innerHTML = shows.map((s) => `
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px; font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; font-weight: ${s.isToday ? '700' : '400'};">
+              <span>${s.isToday ? '🔥 TODAY: ' : '📅 '}<a href="${s.url}" target="_blank" rel="noopener noreferrer" style="color: ${s.isToday ? '#fbbf24' : '#c084fc'}; text-decoration: none;">${this.escapeHtml(s.title)}</a></span>
+              <span style="font-size: 0.7rem; color: #94a3b8; white-space: nowrap;">${this.escapeHtml(s.date)}${s.time ? ` ${this.escapeHtml(s.time)}` : ''}</span>
+            </div>
+          `).join('');
+    } else {
+      listEl.innerHTML = `<p style="font-size: 0.72rem; color: #94a3b8; font-style: italic;">No upcoming shows listed on JamBase.</p>`;
     }
   }
 
@@ -140,6 +273,10 @@ export class UIController {
       savedPlacesList: document.getElementById('saved-places-list'),
       exportDataBtn: document.getElementById('export-data-btn'),
       importFileInput: document.getElementById('import-file-input'),
+      exportDeviceRecoveryBtn: document.getElementById('export-device-recovery-btn'),
+      restoreLegacyBtn: document.getElementById('restore-legacy-btn'),
+      legacyRecoveryBanner: document.getElementById('legacy-recovery-banner'),
+      legacyRecoveryMessage: document.getElementById('legacy-recovery-message'),
 
       // Settings Modal
       settingsModal: document.getElementById('settings-modal'),
@@ -199,6 +336,7 @@ export class UIController {
    * Header Status Updates
    */
   updateHomeHeaderStatus(homeAddress) {
+    if (this.disposed) return;
     if (!this.elements?.homeStatusSubtitle) return;
     if (homeAddress && homeAddress.name) {
       const shortAddr = homeAddress.name.split(',')[0];
@@ -259,8 +397,11 @@ export class UIController {
   }
 
   renderPoiResults(pois = [], onImportClick = null) {
+    if (this.disposed) return;
     const container = this.elements.poiResultsContainer;
     if (!container) return;
+    this._onPoiImport = onImportClick;
+    this._discoveredPois = Array.isArray(pois) ? pois : [];
     container.innerHTML = '';
 
     if (this.elements.poiCountNum) {
@@ -284,9 +425,10 @@ export class UIController {
       return;
     }
 
-    pois.forEach((poi) => {
+    pois.forEach((poi, index) => {
       const card = document.createElement('div');
       card.className = 'poi-item-card';
+      card.dataset.index = String(index);
 
       card.innerHTML = `
         <div class="poi-title-group">
@@ -300,13 +442,6 @@ export class UIController {
           + Import Spot
         </button>
       `;
-
-      card.querySelector('.btn-import-single').addEventListener('click', () => {
-        if (onImportClick) onImportClick(poi);
-        card.style.opacity = '0.5';
-        card.querySelector('.btn-import-single').textContent = '✓ Imported';
-        card.querySelector('.btn-import-single').disabled = true;
-      });
 
       container.appendChild(card);
     });
@@ -328,8 +463,11 @@ export class UIController {
   }
 
   renderJambaseSearchResults(matches = [], onSelect = null) {
+    if (this.disposed) return;
     const container = this.elements.jambasePickerResultsContainer;
     if (!container) return;
+    this._onJambaseSelect = onSelect;
+    this._jambaseMatches = Array.isArray(matches) ? matches : [];
     container.innerHTML = '';
 
     if (!matches || matches.length === 0) {
@@ -341,9 +479,10 @@ export class UIController {
       return;
     }
 
-    matches.forEach((venue) => {
+    matches.forEach((venue, index) => {
       const card = document.createElement('div');
       card.className = 'poi-item-card';
+      card.dataset.index = String(index);
 
       const locationBadge = [venue.city, venue.state].filter(Boolean).join(', ');
 
@@ -362,11 +501,6 @@ export class UIController {
           ✓ Select Venue
         </button>
       `;
-
-      card.querySelector('.btn-select-venue').addEventListener('click', () => {
-        if (onSelect) onSelect(venue);
-        this.closeJambasePickerModal();
-      });
 
       container.appendChild(card);
     });
@@ -393,6 +527,7 @@ export class UIController {
   }
 
   addPersonRow(name = '') {
+    if (this.disposed) return;
     const container = this.elements.peopleListContainer;
     if (!container) return;
 
@@ -403,10 +538,6 @@ export class UIController {
       <input type="text" class="person-name-input" placeholder="e.g. Sarah, John, Vickie" value="${this.escapeHtml(name)}" />
       <button type="button" class="btn-remove-row" title="Remove person">&times;</button>
     `;
-
-    row.querySelector('.btn-remove-row').addEventListener('click', () => {
-      row.remove();
-    });
 
     container.appendChild(row);
   }
@@ -445,6 +576,7 @@ export class UIController {
   }
 
   addContactRow(type = 'phone_mobile', label = '', value = '') {
+    if (this.disposed) return;
     const container = this.elements.contactMethodsContainer;
     if (!container) return;
 
@@ -466,21 +598,6 @@ export class UIController {
       <input type="text" class="contact-value-input" placeholder="${isEmail ? 'e.g. name@example.com' : 'e.g. (555) 000-0000'}" value="${this.escapeHtml(value)}" />
       <button type="button" class="btn-remove-row" title="Remove method">&times;</button>
     `;
-
-    const select = row.querySelector('.contact-type-select');
-    const valueInput = row.querySelector('.contact-value-input');
-    select.addEventListener('change', () => {
-      const selectedType = select.value;
-      if (selectedType.startsWith('email')) {
-        valueInput.placeholder = 'e.g. name@example.com';
-      } else {
-        valueInput.placeholder = 'e.g. (555) 000-0000';
-      }
-    });
-
-    row.querySelector('.btn-remove-row').addEventListener('click', () => {
-      row.remove();
-    });
 
     container.appendChild(row);
   }
@@ -521,6 +638,7 @@ export class UIController {
   }
 
   addEventRow(eventObj = { title: '', day: 'friday', time: '' }) {
+    if (this.disposed) return;
     const container = this.elements.eventsListContainer;
     if (!container) return;
 
@@ -547,10 +665,6 @@ export class UIController {
       <button type="button" class="btn-remove-row" title="Remove event">&times;</button>
     `;
 
-    row.querySelector('.btn-remove-row').addEventListener('click', () => {
-      row.remove();
-    });
-
     container.appendChild(row);
   }
 
@@ -573,6 +687,7 @@ export class UIController {
    * Location Editor Modal Controls
    */
   openLocationModal(data = {}) {
+    if (this.disposed) return;
     const isEdit = Boolean(data.id);
     this.elements.locationModalTitle.textContent = isEdit ? 'Edit Location Details' : 'Add Neighborhood Location';
     
@@ -680,7 +795,11 @@ export class UIController {
    * Render Saved Places Sidebar List
    */
   renderPlacesList(places = [], onPlaceClick = null, onEditClick = null) {
+    if (this.disposed) return;
     if (!this.elements?.placesCountBadge || !this.elements?.savedPlacesList) return;
+    this._onPlaceClick = onPlaceClick;
+    this._onEditClick = onEditClick;
+    this._placesById = new Map((places || []).map((place) => [String(place.id), place]));
     this.elements.placesCountBadge.textContent = places.length;
     const listContainer = this.elements.savedPlacesList;
     listContainer.innerHTML = '';
@@ -837,58 +956,17 @@ export class UIController {
         </div>
       `;
 
-      // Click card to fly to location
-      card.querySelector('.fly-place-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (onPlaceClick) onPlaceClick(place);
-      });
-
-      card.querySelector('.edit-place-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (onEditClick) onEditClick(place);
-      });
-
-      card.addEventListener('click', () => {
-        if (onPlaceClick) onPlaceClick(place);
-      });
-
       listContainer.appendChild(card);
     });
 
-    // Asynchronously fetch upcoming shows for all venue cards in sidebar
-    listContainer.querySelectorAll('.jb-card-shows-box').forEach(async (box) => {
+    listContainer.querySelectorAll('.jb-card-shows-box').forEach((box) => {
       const jbId = box.dataset.jambaseId;
       const listEl = box.querySelector('.jb-card-shows-list');
-      const refreshBtn = box.querySelector('.card-refresh-jb-btn');
-
-      const loadShows = async (force = false) => {
-        if (!jbId || !listEl) return;
-        if (force) listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
-        const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
-        if (shows && shows.length > 0) {
-          listEl.innerHTML = shows.map(s => `
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px; font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; font-weight: ${s.isToday ? '700' : '400'};">
-              <span>${s.isToday ? '🔥 TODAY: ' : '📅 '}<a href="${s.url}" target="_blank" rel="noopener noreferrer" style="color: ${s.isToday ? '#fbbf24' : '#c084fc'}; text-decoration: none;">${this.escapeHtml(s.title)}</a></span>
-              <span style="font-size: 0.7rem; color: #94a3b8; white-space: nowrap;">${this.escapeHtml(s.date)}${s.time ? ` ${this.escapeHtml(s.time)}` : ''}</span>
-            </div>
-          `).join('');
-
-          listEl.querySelectorAll('a').forEach(a => {
-            a.addEventListener('click', (e) => e.stopPropagation());
-          });
-        } else {
-          listEl.innerHTML = `<p style="font-size: 0.72rem; color: #94a3b8; font-style: italic;">No upcoming shows listed on JamBase.</p>`;
-        }
-      };
-
-      loadShows(false);
-
-      if (refreshBtn) {
-        refreshBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          loadShows(true);
-        });
-      }
+      if (!jbId || !listEl) return;
+      JamBaseService.fetchUpcomingShows(jbId, false).then((shows) => {
+        if (this.disposed || !listEl.isConnected) return;
+        this.renderSidebarJamBaseShows(listEl, shows);
+      });
     });
   }
 
@@ -934,6 +1012,44 @@ export class UIController {
     } else {
       if (this.elements.keyWarningBanner) this.elements.keyWarningBanner.classList.remove('hidden');
       if (this.elements.keyWarningDot) this.elements.keyWarningDot.classList.remove('hidden');
+    }
+  }
+
+  /**
+   * Leftover unprefixed keys / device recovery. Shown instead of silently
+   * seeding demos when Web Locks cannot finish a one-time upgrade.
+   */
+  updateLegacyRecoveryBanner(status = {}) {
+    if (this.disposed) return;
+    const banner = this.elements.legacyRecoveryBanner;
+    const message = this.elements.legacyRecoveryMessage;
+    const restoreBtn = this.elements.restoreLegacyBtn;
+    if (!banner) return;
+    const leftoverPresent = Boolean(status.leftoverPresent);
+    const ownerOrphans = Array.isArray(status.ownerOrphans) ? status.ownerOrphans.length : 0;
+    const deviceOrphans = Array.isArray(status.deviceOrphans) ? status.deviceOrphans.length : 0;
+    const needsAttention = leftoverPresent || ownerOrphans > 0 || deviceOrphans > 0;
+    if (!needsAttention) {
+      banner.classList.add('hidden');
+      return;
+    }
+    banner.classList.remove('hidden');
+    const parts = [];
+    if (leftoverPresent && !status.locksAvailable) {
+      parts.push('Previous neighborhood data is still on this device and was not applied automatically (this browser cannot take a Web Lock).');
+    } else if (leftoverPresent) {
+      parts.push('Previous neighborhood data is still on this device. Restore it into this account or download a recovery file.');
+    }
+    if (ownerOrphans > 0) {
+      parts.push(`${ownerOrphans} leftover record(s) belong to this account.`);
+    }
+    if (deviceOrphans > 0) {
+      parts.push(`${deviceOrphans} device-level leftover record(s) are not bound to this account.`);
+    }
+    if (message) message.textContent = parts.join(' ');
+    if (restoreBtn) {
+      restoreBtn.classList.toggle('hidden', !leftoverPresent);
+      restoreBtn.disabled = leftoverPresent && !status.locksAvailable;
     }
   }
 

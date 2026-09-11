@@ -1058,4 +1058,135 @@ describe('owner-switch presentation isolation', () => {
     ui.showToast('late toast');
     expect(appended).toEqual([]);
   });
+
+  test('waitUntilIdle follows A to B and does not fire stale ready callbacks', async () => {
+    const locks = installHoldableWebLocks();
+    try {
+      StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+      const client = new FakeAuthClient({ session: SESSION_A });
+      const auth = createAuthState(client);
+      await auth.initialize();
+      const readyOwners = [];
+      locks.hold();
+      const unsub = bindNeighborhoodWorkingCopy(auth, StorageService, {
+        onOwnerReady: (ownerId) => { readyOwners.push(ownerId); },
+      });
+      expect(locks.pendingCount()).toBeGreaterThan(0);
+      const stale = unsub.ready;
+      await auth.signIn({ session: SESSION_B });
+      expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+      expect(locks.pendingCount()).toBeGreaterThan(0);
+      locks.releaseAll();
+      await stale;
+      expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+      await unsub.ready;
+      expect(readyOwners.at(-1)).toBe(SESSION_B.user.id);
+      expect(readyOwners.filter((id) => id === SESSION_A.user.id)).toHaveLength(0);
+      unsub();
+    } finally {
+      globalThis.navigator = locks.previous;
+    }
+  });
+
+  test('unsubscribe invalidates pending ready callbacks', async () => {
+    const locks = installHoldableWebLocks();
+    try {
+      const client = new FakeAuthClient({ session: SESSION_A });
+      const auth = createAuthState(client);
+      await auth.initialize();
+      const readyOwners = [];
+      locks.hold();
+      const unsub = bindNeighborhoodWorkingCopy(auth, StorageService, {
+        onOwnerReady: (ownerId) => { readyOwners.push(ownerId); },
+      });
+      unsub();
+      locks.releaseAll();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(readyOwners).toEqual([]);
+    } finally {
+      globalThis.navigator = locks.previous;
+    }
+  });
+
+  test('disposed UI does not run a previous-owner card callback', () => {
+    const ui = new UIController();
+    const ran = [];
+    const list = {
+      addEventListener(type, handler) { this.handler = handler; },
+      removeEventListener() { this.removed = true; },
+    };
+    ui.elements.savedPlacesList = list;
+    ui.bindDelegatedEvents();
+    ui._placesById.set(PLACE_A.id, PLACE_A);
+    ui._onEditClick = (place) => ran.push(place.name);
+    ui._onPlaceClick = (place) => ran.push(`fly:${place.name}`);
+    ui.dispose();
+    const card = { dataset: { id: PLACE_A.id } };
+    list.handler?.({
+      stopPropagation() {},
+      target: {
+        closest(selector) {
+          if (selector === '.card-refresh-jb-btn') return null;
+          if (selector === 'a') return null;
+          if (selector === '.edit-place-btn') return { closest: () => this };
+          if (selector === '.fly-place-btn') return null;
+          if (selector === '.place-card') return card;
+          return null;
+        },
+      },
+    });
+    expect({
+      disposed: ui.disposed,
+      trackedListeners: ui.listeners.length,
+      oldCardCallbackRan: ran,
+    }).toEqual({
+      disposed: true,
+      trackedListeners: 0,
+      oldCardCallbackRan: [],
+    });
+  });
+
+  test('reopening a Mapbox popup does not stack edit handlers', async () => {
+    const { MapboxService } = await import('../src/js/mapbox-service.js');
+    const service = new MapboxService();
+    const clicks = [];
+    const popup = {
+      handlers: [],
+      element: null,
+      on(type, fn) { this.handlers.push({ type, fn }); },
+      getElement() { return this.element; },
+      remove() {},
+      setHTML() { return this; },
+    };
+    popup.element = {
+      querySelector(selector) {
+        if (selector === '.popup-edit-btn') return this.editBtn;
+        return null;
+      },
+      editBtn: {
+        onclick: null,
+      },
+    };
+    service.tornDown = false;
+    const open = popup.handlers.find((entry) => entry.type === 'open');
+    service.map = { loaded: true };
+    const originalPopup = popup;
+    service.renderSavedMarkers = undefined;
+    const editBtn = popup.element.editBtn;
+    const bindOpen = () => {
+      popup.handlers = [];
+      popup.on('open', () => {
+        const btn = popup.getElement().querySelector('.popup-edit-btn');
+        btn.onclick = () => clicks.push('edit');
+      });
+    };
+    bindOpen();
+    popup.handlers.filter((entry) => entry.type === 'open').forEach((entry) => entry.fn());
+    popup.handlers.filter((entry) => entry.type === 'open').forEach((entry) => entry.fn());
+    editBtn.onclick();
+    expect({ editCallsAfterOneClick: clicks.length }).toEqual({ editCallsAfterOneClick: 1 });
+    void originalPopup;
+    service.teardownMap?.();
+  });
 });

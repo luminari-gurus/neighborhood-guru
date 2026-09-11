@@ -163,6 +163,33 @@ export class NeighborhoodGuruApp {
 
     this.renderNeighborhoodView();
     this.fetchAndDisplayWeather();
+    this.refreshLegacyRecovery();
+  }
+
+  refreshLegacyRecovery() {
+    if (this.disposed) return;
+    const status = typeof this.storage.legacyMigrationStatus === 'function'
+      ? this.storage.legacyMigrationStatus()
+      : { leftoverPresent: false, locksAvailable: true, leftovers: [], ownerOrphans: [], deviceOrphans: [] };
+    this.ui.updateLegacyRecoveryBanner?.(status);
+  }
+
+  async handleRestoreLegacyLeftover() {
+    if (this.disposed) return;
+    const status = this.storage.legacyMigrationStatus?.() || {};
+    if (!status.locksAvailable) {
+      this.ui.showToast('This browser cannot finish the leftover upgrade automatically. Download device recovery instead.', 'warning', 8000);
+      return;
+    }
+    await this.storage.ensureLegacyMigratedAsync();
+    if (this.disposed) return;
+    this.syncNeighborhoodViewFromStorage();
+    const after = this.storage.legacyMigrationStatus?.() || {};
+    const destHasHome = Boolean(this.homeAddress);
+    const destHasPlaces = Array.isArray(this.savedPlaces) && this.savedPlaces.length > 0;
+    if (!destHasHome && !destHasPlaces && after.leftoverPresent) {
+      this.ui.showToast('Leftover data is still on this device and was not applied to this account. Download device recovery to keep a copy.', 'warning', 8000);
+    }
   }
 
   clearOwnerScopedPresentation() {
@@ -553,9 +580,10 @@ export class NeighborhoodGuruApp {
       const generation = this.neighborhoodGeneration;
       const namespaceId = this.storage.getNamespaceId();
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
-        const success = this.storage.importDataJSON(event.target.result);
+        const success = await this.storage.importDataJSON(event.target.result);
+        if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
         if (success) {
           this.ui.showToast('Data imported successfully! Reloading...', 'success');
           this.scheduleTimeout(() => window.location.reload(), 1000);
@@ -564,6 +592,22 @@ export class NeighborhoodGuruApp {
         }
       };
       reader.readAsText(file);
+    });
+
+    this.listen(el.exportDeviceRecoveryBtn, 'click', () => {
+      const jsonStr = this.storage.exportDeviceRecoveryJSON();
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `neighborhood-guru-device-recovery-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      this.ui.showToast('Device recovery file downloaded. Review it before restoring — it is not bound to the signed-in account.', 'warning', 8000);
+    });
+
+    this.listen(el.restoreLegacyBtn, 'click', () => {
+      this.handleRestoreLegacyLeftover();
     });
 
     // --- Map Hint Dismiss ---
