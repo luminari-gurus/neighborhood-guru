@@ -58,6 +58,42 @@ function createMemoryLocalStorage(initial = {}) {
   };
 }
 
+function installHoldableWebLocks() {
+  let autoGrant = true;
+  const waiters = [];
+  const previous = globalThis.navigator;
+  globalThis.navigator = {
+    ...(previous || {}),
+    locks: {
+      request(name, options, callback) {
+        if (typeof options === 'function') {
+          callback = options;
+          options = {};
+        }
+        return new Promise((resolve, reject) => {
+          const run = () => {
+            Promise.resolve()
+              .then(() => callback())
+              .then(resolve, reject);
+          };
+          if (autoGrant) run();
+          else waiters.push(run);
+        });
+      },
+    },
+  };
+  return {
+    previous,
+    hold() { autoGrant = false; },
+    releaseAll() {
+      autoGrant = true;
+      const queued = waiters.splice(0, waiters.length);
+      queued.forEach((run) => run());
+    },
+    pendingCount() { return waiters.length; },
+  };
+}
+
 function createStubUi() {
   const values = {
     formLocationId: "Ada's place",
@@ -435,6 +471,72 @@ describe('owner-switch presentation isolation', () => {
     expect(ui.renderedPois).toEqual([]);
 
     app.dispose();
+  });
+
+  test('delayed migration lock cannot let Alice POI or weather commit for Bob', async () => {
+    const locks = installHoldableWebLocks();
+    try {
+      StorageService.setOwner(SESSION_A.user.id);
+      StorageService.setHomeAddress(HOME_A);
+      const ui = createStubUi();
+      const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+
+      let resolvePois;
+      OverpassService.fetchNearbyPois = () => new Promise((resolve) => {
+        resolvePois = resolve;
+      });
+      let resolveWeather;
+      globalThis.fetch = () => new Promise((resolve) => {
+        resolveWeather = () => resolve(new Response(JSON.stringify({
+          current_weather: { temperature: 99, windspeed: 1, weathercode: 0 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      });
+
+      const poiDone = app.handleDiscoverPois();
+      const weatherDone = app.fetchAndDisplayWeather();
+      const generationBefore = app.neighborhoodGeneration;
+      const poiGenBefore = app.poiSearchGeneration;
+
+      locks.hold();
+      const signedIn = auth.signIn({ session: SESSION_B });
+      for (let i = 0; i < 30 && locks.pendingCount() === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(locks.pendingCount()).toBeGreaterThan(0);
+      expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+      expect(app.neighborhoodGeneration).toBeGreaterThan(generationBefore);
+      expect(app.poiSearchGeneration).toBeGreaterThan(poiGenBefore);
+
+      const weatherCountAfterClear = ui.weatherUpdates.length;
+      resolvePois([{
+        name: 'Ada cafe',
+        typeLabel: 'Cafe',
+        category: 'favorite',
+        address: '',
+        notes: '',
+        color: '#3b82f6',
+        lat: 1,
+        lng: 1,
+      }]);
+      await poiDone;
+      resolveWeather();
+      await weatherDone;
+
+      expect(app.currentDiscoveredPois).toEqual([]);
+      app.applyPoiFilter();
+      expect(ui.renderedPois).toEqual([]);
+      expect(ui.weatherUpdates.slice(weatherCountAfterClear).some((weather) => weather?.temp === 99)).toBe(false);
+
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        current_weather: { temperature: 70, windspeed: 1, weathercode: 0 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+      locks.releaseAll();
+      await signedIn;
+      await app.unsubscribeWorkingCopy.ready;
+      app.dispose();
+    } finally {
+      globalThis.navigator = locks.previous;
+    }
   });
 
   test('storage exceptions still clear the previous owner UI', async () => {
@@ -826,25 +928,81 @@ describe('owner-switch presentation isolation', () => {
   });
 
   test('late map load renders the current owner home not a captured previous home', async () => {
-    const homes = [];
-    const mapboxService = createStubMapbox();
-    mapboxService.renderHomeMarker = (home) => {
-      homes.push(home?.name ?? null);
+    const mapboxgl = (await import('mapbox-gl')).default;
+    const { MapboxService } = await import('../src/js/mapbox-service.js');
+    const original = {
+      Map: mapboxgl.Map,
+      NavigationControl: mapboxgl.NavigationControl,
+      ScaleControl: mapboxgl.ScaleControl,
     };
-    mapboxService.map = { loaded: true };
-    StorageService.setOwner(SESSION_A.user.id);
-    StorageService.setHomeAddress({ name: 'Alice home', lat: 1, lng: 1 });
-    const ui = createStubUi();
-    const { app, auth } = await createBoundApp({ ui, mapboxService, session: SESSION_A });
-    expect(app.homeAddress.name).toBe('Alice home');
+    const createdMaps = [];
+    class DeferredMap {
+      constructor() {
+        this.handlers = [];
+        createdMaps.push(this);
+      }
+      on(type, fn) { this.handlers.push({ type, fn }); }
+      off(type, fn) { this.handlers = this.handlers.filter((entry) => entry.fn !== fn); }
+      addControl() {}
+      remove() { this.removed = true; }
+      getSource() { return null; }
+      addSource() {}
+      addLayer() {}
+      getLayer() { return null; }
+      getStyle() { return { layers: [] }; }
+      setFog() {}
+      setTerrain() {}
+      setLayoutProperty() {}
+      loaded() { return false; }
+      emit(type, event) {
+        for (const entry of [...this.handlers]) {
+          if (entry.type === type) entry.fn(event);
+        }
+      }
+    }
+    class FakeControl {}
+    mapboxgl.Map = DeferredMap;
+    mapboxgl.NavigationControl = FakeControl;
+    mapboxgl.ScaleControl = FakeControl;
 
-    await auth.signIn({ session: SESSION_B });
-    await app.unsubscribeWorkingCopy.ready;
-    expect(app.homeAddress).toBeNull();
-    homes.length = 0;
-    app.renderNeighborhoodView();
-    expect(homes).toEqual([]);
-    app.dispose();
+    try {
+      const mapboxService = new MapboxService();
+      const homes = [];
+      mapboxService.renderHomeMarker = (home) => {
+        homes.push(home?.name ?? null);
+      };
+      mapboxService.renderSavedMarkers = () => {};
+
+      StorageService.setOwner(SESSION_A.user.id);
+      StorageService.setHomeAddress({ name: 'Alice home', lat: 1, lng: 1 });
+      const ui = createStubUi();
+      const { app, auth } = await createBoundApp({ ui, mapboxService, session: SESSION_A });
+      expect(app.homeAddress.name).toBe('Alice home');
+
+      const map = mapboxService.initMap('map', {
+        token: 'pk.test',
+        homeAddress: app.homeAddress,
+        onLoad: () => {
+          if (app.disposed || mapboxService.tornDown) return;
+          app.renderNeighborhoodView();
+        },
+      });
+      expect(map).toBeTruthy();
+      expect(createdMaps).toHaveLength(1);
+      expect(map.handlers.some((entry) => entry.type === 'load')).toBe(true);
+
+      await auth.signIn({ session: SESSION_B });
+      await app.unsubscribeWorkingCopy.ready;
+      expect(app.homeAddress).toBeNull();
+      homes.length = 0;
+      map.emit('load');
+      expect(homes).toEqual([]);
+      app.dispose();
+    } finally {
+      mapboxgl.Map = original.Map;
+      mapboxgl.NavigationControl = original.NavigationControl;
+      mapboxgl.ScaleControl = original.ScaleControl;
+    }
   });
 
   test('older address search cannot replace a newer map-click marker', async () => {
@@ -888,5 +1046,16 @@ describe('owner-switch presentation isolation', () => {
     expect(clicks).toBe(0);
     expect(timed).toBe(0);
     expect(target.removed).toBe(true);
+  });
+
+  test('UIController.showToast is a no-op after dispose', () => {
+    const ui = new UIController();
+    const appended = [];
+    ui.elements.toastContainer = {
+      appendChild(node) { appended.push(node); },
+    };
+    ui.dispose();
+    ui.showToast('late toast');
+    expect(appended).toEqual([]);
   });
 });

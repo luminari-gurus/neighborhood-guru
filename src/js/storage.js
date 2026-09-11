@@ -531,6 +531,29 @@ function runFailClosedLegacyMigration(anonymous, ownerId) {
   }
 }
 
+/**
+ * Owner flipped between scheduling migration and receiving the Web Lock.
+ * Never copy into the live (or snapshot) namespace; leftover becomes
+ * unowned device recovery so the new owner cannot adopt it.
+ */
+function runOwnerMismatchFailClosed() {
+  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+    try {
+      const leftover = readItem(legacyKey);
+      if (leftover == null) continue;
+      if (!deviceQuarantineLegacyValue(suffix, leftover)) continue;
+      if (!matchesCopiedValue(readItem(legacyKey), leftover)) continue;
+      try {
+        removeItem(legacyKey);
+      } catch {
+        // Quarantine already makes the leftover non-adoptable.
+      }
+    } catch {
+      // Skip copy into whichever owner happens to be live.
+    }
+  }
+}
+
 function runExclusiveLegacyMigration(anonymous, ownerId) {
   const namespaceId = namespaceIdFor(anonymous, ownerId);
   exclusiveMigrationDepth += 1;
@@ -784,21 +807,38 @@ export const StorageService = {
   },
 
   async ensureLegacyMigratedAsync() {
+    const anonymous = this._anonymous;
+    const ownerId = this._ownerId;
+    const namespaceId = namespaceIdFor(anonymous, ownerId);
     if (webMigrationLocksAvailable()) {
       await withLegacyMigrationWebLock(() => {
-        runExclusiveLegacyMigration(this._anonymous, this._ownerId);
+        const liveNamespaceId = namespaceIdFor(this._anonymous, this._ownerId);
+        if (liveNamespaceId !== namespaceId) {
+          runOwnerMismatchFailClosed();
+          return;
+        }
+        runExclusiveLegacyMigration(anonymous, ownerId);
       });
       return;
     }
-    runFailClosedLegacyMigration(this._anonymous, this._ownerId);
+    runFailClosedLegacyMigration(anonymous, ownerId);
   },
 
+  /**
+   * Test-only nested exclusive helper for claim-race interleaving.
+   * Production must use `ensureLegacyMigratedAsync`. Without an exclusive
+   * lock already held, leftovers are fail-closed (no unlocked copy).
+   */
   migrateLegacyForOwner(ownerId) {
-    if (ownerId == null || ownerId === ANONYMOUS_OWNER_ID || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
-      runExclusiveLegacyMigration(true, ANONYMOUS_OWNER_ID);
+    const anonymous = ownerId == null
+      || ownerId === ANONYMOUS_OWNER_ID
+      || (typeof ownerId === 'string' && ownerId.trim().length === 0);
+    const resolvedOwnerId = anonymous ? ANONYMOUS_OWNER_ID : ownerId;
+    if (exclusiveMigrationDepth > 0) {
+      runExclusiveLegacyMigration(anonymous, resolvedOwnerId);
       return;
     }
-    runExclusiveLegacyMigration(false, ownerId);
+    runFailClosedLegacyMigration(anonymous, resolvedOwnerId);
   },
 
   workingCopyKey(suffix) {
@@ -1104,6 +1144,7 @@ export const StorageService = {
       }
       const namespaceId = this.getNamespaceId();
       const orphans = Array.isArray(data.orphanedWorkingCopies) ? data.orphanedWorkingCopies : [];
+      let orphansOk = true;
       for (const orphan of orphans) {
         if (!orphan || typeof orphan !== 'object') continue;
         let raw = null;
@@ -1128,13 +1169,14 @@ export const StorageService = {
         const existing = readItem(preferredKey);
         if (existing == null) {
           writeItem(preferredKey, envelope);
+          if (readItem(preferredKey) !== envelope) orphansOk = false;
           continue;
         }
         const existingParsed = parseOrphanEnvelope(existing);
         if (existingParsed.raw === raw && existingParsed.namespaceId === namespaceId) continue;
-        writeOrphanEnvelope(suffix, envelope, raw, namespaceId);
+        if (!writeOrphanEnvelope(suffix, envelope, raw, namespaceId)) orphansOk = false;
       }
-      return true;
+      return orphansOk;
     } catch (e) {
       console.error('Failed to parse import JSON', e);
       return false;

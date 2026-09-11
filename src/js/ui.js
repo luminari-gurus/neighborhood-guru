@@ -941,6 +941,7 @@ export class UIController {
    * Toast Notifications System
    */
   showToast(message, type = 'info', durationMs = 3500) {
+    if (this.disposed) return;
     const container = this.elements.toastContainer || document.getElementById('toast-container');
     if (!container) {
       console.warn('Toast container missing:', message);

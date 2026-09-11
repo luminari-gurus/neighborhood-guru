@@ -169,6 +169,8 @@ export class NeighborhoodGuruApp {
     this.homeAddress = null;
     this.savedPlaces = [];
     this.currentDiscoveredPois = [];
+    this.neighborhoodGeneration += 1;
+    this.poiSearchGeneration += 1;
     this.poiDiscoveryGeneration = -1;
     this.bumpEditorRevision();
     this.editorNamespaceId = null;

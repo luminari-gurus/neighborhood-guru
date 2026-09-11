@@ -187,6 +187,39 @@ function installFakeWebLocks() {
   };
 }
 
+function installGatedWebLocks() {
+  let grant = null;
+  globalThis.navigator = {
+    ...(globalThis.navigator || {}),
+    locks: {
+      request(name, options, callback) {
+        if (typeof options === 'function') {
+          callback = options;
+          options = {};
+        }
+        return new Promise((resolve, reject) => {
+          grant = () => {
+            Promise.resolve()
+              .then(() => callback())
+              .then(resolve, reject);
+          };
+        });
+      },
+    },
+  };
+  return {
+    async waitForGrant() {
+      for (let i = 0; i < 20 && typeof grant !== 'function'; i += 1) {
+        await Promise.resolve();
+      }
+      if (typeof grant !== 'function') {
+        throw new Error('Web Lock was not requested');
+      }
+      return grant;
+    },
+  };
+}
+
 async function bootstrapOwner(ownerId = null, storage = StorageService) {
   storage.setOwner(ownerId, { migrate: false });
   await storage.ensureLegacyMigratedAsync();
@@ -1056,6 +1089,38 @@ describe('namespaced browser storage', () => {
     expect(result.alice === 'shared legacy private home' || result.bob === 'shared legacy private home').toBe(true);
   });
 
+  test('owner flip between schedule and lock grant does not adopt into the new owner', async () => {
+    const leftover = { name: 'Bob leftover home', lat: 1, lng: 1 };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(leftover));
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    const gated = installGatedWebLocks();
+    const pending = StorageService.ensureLegacyMigratedAsync();
+    const grant = await gated.waitForGrant();
+    StorageService.setOwner(null, { migrate: false });
+    expect(StorageService.getNamespaceId()).toBe(ANONYMOUS_OWNER_ID);
+    grant();
+    await pending;
+
+    expect(StorageService.getHomeAddress()?.name).not.toBe('Bob leftover home');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    expect(StorageService.getHomeAddress()?.name).not.toBe('Bob leftover home');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
+    expect(StorageService.listDeviceOrphanedWorkingCopies().some((orphan) => (
+      orphan.preview?.homeName === 'Bob leftover home'
+    ))).toBe(true);
+  });
+
+  test('migrateLegacyForOwner without a held lock does not exclusively adopt leftover', () => {
+    const leftover = { name: 'unlocked leftover', lat: 2, lng: 2 };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(leftover));
+    StorageService.migrateLegacyForOwner(SESSION_B.user.id);
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    expect(StorageService.getHomeAddress()?.name).not.toBe('unlocked leftover');
+    expect(StorageService.getHomeAddress()).toBeNull();
+  });
+
   test('ensureLegacyMigratedAsync uses Web Locks when navigator.locks is available', async () => {
     const requests = [];
     const previous = globalThis.navigator;
@@ -1160,6 +1225,38 @@ describe('namespaced browser storage', () => {
     expect(device.deviceOrphanedWorkingCopies.some((orphan) => (
       orphan.preview?.homeName === 'ambiguous leftover'
     ))).toBe(true);
+  });
+
+  test('import returns false when orphan envelope write fails', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    writeOwnerOrphan(
+      WORKING_COPY_KEYS.HOME_ADDRESS,
+      { name: 'Alice hidden', lat: 1, lng: 1 },
+      `user:${SESSION_A.user.id}`,
+    );
+    const aliceKey = orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS);
+    const inner = globalThis.localStorage;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        if (String(key).startsWith('neighborhood_guru:orphaned:') && key !== aliceKey) {
+          return;
+        }
+        store.setItem(key, value);
+      },
+    });
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    expect(StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      orphanedWorkingCopies: [{
+        key: aliceKey,
+        suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
+        namespaceId: `user:${SESSION_B.user.id}`,
+        raw: JSON.stringify({ name: 'Bob overwrite', lat: 9, lng: 9 }),
+      }],
+    }))).toBe(false);
+    const stored = JSON.parse(inner.getItem(aliceKey));
+    expect(JSON.parse(stored.raw).name).toBe('Alice hidden');
+    expect(stored.namespaceId).toBe(`user:${SESSION_A.user.id}`);
   });
 
   test('account import cannot overwrite another owner orphan', () => {
