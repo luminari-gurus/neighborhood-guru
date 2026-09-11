@@ -1145,6 +1145,21 @@ body, html {
   gap: 8px;
 }
 
+.legacy-owner-orphan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.legacy-owner-orphan-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 /* Empty State */
 .empty-state {
   display: flex;

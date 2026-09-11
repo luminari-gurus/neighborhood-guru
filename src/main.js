@@ -170,26 +170,75 @@ export class NeighborhoodGuruApp {
     if (this.disposed) return;
     const status = typeof this.storage.legacyMigrationStatus === 'function'
       ? this.storage.legacyMigrationStatus()
-      : { leftoverPresent: false, leftoverUnapplied: false, leftoverAdoptable: false, locksAvailable: true, leftovers: [], ownerOrphans: [], deviceOrphans: [] };
+      : { leftoverPresent: false, leftoverUnapplied: false, leftoverAdoptable: false, locksAvailable: true, leftovers: [], ambiguousLeftovers: [], ownerOrphans: [], deviceOrphans: [], importRollbackIncomplete: false };
     this.ui.updateLegacyRecoveryBanner?.(status);
   }
 
   async handleRestoreLegacyLeftover() {
     if (this.disposed) return;
+    const generation = this.neighborhoodGeneration;
+    const namespaceId = this.storage.getNamespaceId();
     const status = this.storage.legacyMigrationStatus?.() || {};
     if (!status.locksAvailable) {
       this.ui.showToast('This browser cannot finish the leftover upgrade automatically. Download device recovery instead.', 'warning', 8000);
       return;
     }
-    await this.storage.ensureLegacyMigratedAsync();
-    if (this.disposed) return;
+    const result = await this.storage.ensureLegacyMigratedAsync();
+    if (this.disposed || !this.isSameOwnerGeneration(generation, namespaceId)) return;
+    this.refreshLegacyRecovery();
+    if (!result?.ok) {
+      const reason = result?.reason;
+      if (reason === 'lock-rejected' || reason === 'lock-unavailable') {
+        this.ui.showToast('Could not finish leftover restore because a storage lock was unavailable. Download device recovery to keep a copy.', 'warning', 8000);
+      } else if (reason === 'owner-changed') {
+        this.ui.showToast('Account changed before leftover restore finished. Nothing was applied to the new account.', 'warning', 8000);
+      } else {
+        this.ui.showToast('Leftover restore did not finish. Download device recovery to keep a copy.', 'warning', 8000);
+      }
+      return;
+    }
     this.syncNeighborhoodViewFromStorage();
+    if (this.disposed || !this.isSameOwnerGeneration(generation, namespaceId)) return;
     const after = this.storage.legacyMigrationStatus?.() || {};
     const destHasHome = Boolean(this.homeAddress);
     const destHasPlaces = Array.isArray(this.savedPlaces) && this.savedPlaces.length > 0;
-    if (!destHasHome && !destHasPlaces && after.leftoverPresent) {
+    if (!destHasHome && !destHasPlaces && (after.leftoverPresent || after.leftoverUnapplied)) {
       this.ui.showToast('Leftover data is still on this device and was not applied to this account. Download device recovery to keep a copy.', 'warning', 8000);
     }
+  }
+
+  handleOwnerOrphanAction(action, key) {
+    if (this.disposed || !key) return;
+    const preview = this.storage.previewOrphanedWorkingCopy?.(key);
+    if (!preview) {
+      this.ui.showToast('That leftover record is not available for this account.', 'warning', 6000);
+      return;
+    }
+    const label = preview.preview?.homeName
+      || (Array.isArray(preview.preview?.placeNames) && preview.preview.placeNames[0])
+      || 'leftover record';
+    if (action === 'preview') {
+      const extra = preview.preview?.placeCount
+        ? ` (${preview.preview.placeCount} place(s))`
+        : '';
+      this.ui.showToast(`Leftover preview: ${label}${extra}`, 'info', 7000);
+      return;
+    }
+    const mode = action === 'merge' ? 'merge' : 'replace';
+    const confirmed = typeof globalThis.confirm === 'function'
+      ? globalThis.confirm(`${mode === 'merge' ? 'Merge' : 'Replace with'} leftover "${label}" in this account?`)
+      : true;
+    if (!confirmed) return;
+    const result = this.storage.restoreOrphanedWorkingCopy(key, { mode });
+    if (!result?.ok) {
+      this.ui.showToast(result?.reason === 'conflict'
+        ? 'This account already has a home. Use Replace to overwrite it, or keep the current home.'
+        : 'Could not restore that leftover into this account.', 'warning', 7000);
+      this.refreshLegacyRecovery();
+      return;
+    }
+    this.syncNeighborhoodViewFromStorage();
+    this.ui.showToast(mode === 'merge' ? 'Leftover merged into this account.' : 'Leftover restored into this account.', 'success');
   }
 
   clearOwnerScopedPresentation() {
@@ -582,13 +631,25 @@ export class NeighborhoodGuruApp {
       const reader = new FileReader();
       reader.onload = async (event) => {
         if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
-        const success = await this.storage.importDataJSON(event.target.result);
+        const result = await this.storage.importDataJSON(event.target.result);
         if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
-        if (success) {
+        if (result?.ok) {
           this.ui.showToast('Data imported successfully! Reloading...', 'success');
           this.scheduleTimeout(() => window.location.reload(), 1000);
-        } else {
+          return;
+        }
+        const reason = result?.reason;
+        if (reason === 'lock-unavailable' || reason === 'lock-rejected') {
+          this.ui.showToast('Import needs a browser storage lock. Try again, or use a browser that supports Web Locks.', 'warning', 8000);
+        } else if (reason === 'owner-changed') {
+          this.ui.showToast('Account changed before import finished. Nothing was written to the new account.', 'warning', 8000);
+        } else if (reason === 'rollback-incomplete') {
+          this.ui.showToast('Import did not finish and could not fully undo. Download device recovery and review storage before continuing.', 'error', 10000);
+          this.refreshLegacyRecovery();
+        } else if (reason === 'invalid-document') {
           this.ui.showToast('Failed to import JSON file. Invalid format.', 'error');
+        } else {
+          this.ui.showToast('Failed to import neighborhood data.', 'error');
         }
       };
       reader.readAsText(file);
@@ -608,6 +669,12 @@ export class NeighborhoodGuruApp {
 
     this.listen(el.restoreLegacyBtn, 'click', () => {
       this.handleRestoreLegacyLeftover();
+    });
+
+    this.listen(el.legacyRecoveryBanner, 'click', (e) => {
+      const btn = e.target.closest('[data-orphan-action]');
+      if (!btn) return;
+      this.handleOwnerOrphanAction(btn.dataset.orphanAction, btn.dataset.orphanKey);
     });
 
     // --- Map Hint Dismiss ---

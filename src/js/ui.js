@@ -10,6 +10,7 @@ export class UIController {
     this.listeners = [];
     this.timeouts = [];
     this._placesById = new Map();
+    this._placesByToken = new Map();
     this._onPlaceClick = null;
     this._onEditClick = null;
     this._onPoiImport = null;
@@ -63,6 +64,7 @@ export class UIController {
     this._onPoiImport = null;
     this._onJambaseSelect = null;
     this._placesById.clear();
+    this._placesByToken?.clear();
     this._discoveredPois = [];
     this._jambaseMatches = [];
     try {
@@ -108,9 +110,11 @@ export class UIController {
         const jbId = box?.dataset?.jambaseId;
         const listEl = box?.querySelector('.jb-card-shows-list');
         if (!jbId || !listEl) return;
+        const token = String(Number(listEl.dataset.showsGeneration || '0') + 1);
+        listEl.dataset.showsGeneration = token;
         listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
         JamBaseService.fetchUpcomingShows(jbId, true).then((shows) => {
-          if (this.disposed || !listEl.isConnected) return;
+          if (this.disposed || !listEl.isConnected || listEl.dataset.showsGeneration !== token) return;
           this.renderSidebarJamBaseShows(listEl, shows);
         });
         return;
@@ -122,8 +126,8 @@ export class UIController {
       const editBtn = e.target.closest('.edit-place-btn');
       const flyBtn = e.target.closest('.fly-place-btn');
       const card = e.target.closest('.place-card');
-      const id = card?.dataset?.id;
-      const place = id ? this._placesById.get(id) : null;
+      const token = card?.dataset?.renderToken;
+      const place = token ? this._placesByToken.get(token) : null;
       if (!place) return;
       if (editBtn) {
         e.stopPropagation();
@@ -277,10 +281,11 @@ export class UIController {
       savedPlacesList: document.getElementById('saved-places-list'),
       exportDataBtn: document.getElementById('export-data-btn'),
       importFileInput: document.getElementById('import-file-input'),
-      exportDeviceRecoveryBtn: document.getElementById('export-device-recovery-btn'),
       restoreLegacyBtn: document.getElementById('restore-legacy-btn'),
+      exportDeviceRecoveryBtn: document.getElementById('export-device-recovery-btn'),
       legacyRecoveryBanner: document.getElementById('legacy-recovery-banner'),
       legacyRecoveryMessage: document.getElementById('legacy-recovery-message'),
+      legacyOwnerOrphanList: document.getElementById('legacy-owner-orphan-list'),
 
       // Settings Modal
       settingsModal: document.getElementById('settings-modal'),
@@ -810,7 +815,8 @@ export class UIController {
     if (!this.elements?.placesCountBadge || !this.elements?.savedPlacesList) return;
     this._onPlaceClick = onPlaceClick;
     this._onEditClick = onEditClick;
-    this._placesById = new Map((places || []).map((place) => [String(place.id), place]));
+    this._placesById = new Map();
+    this._placesByToken = new Map();
     this.elements.placesCountBadge.textContent = places.length;
     const listContainer = this.elements.savedPlacesList;
     listContainer.innerHTML = '';
@@ -856,10 +862,14 @@ export class UIController {
       return;
     }
 
-    filtered.forEach((place) => {
+    filtered.forEach((place, index) => {
       const card = document.createElement('div');
       card.className = 'place-card';
       card.dataset.id = place.id;
+      const renderToken = `${String(place.id ?? 'place')}:${index}`;
+      card.dataset.renderToken = renderToken;
+      this._placesByToken.set(renderToken, place);
+      this._placesById.set(String(place.id), place);
 
       const people = getPlacePeople(place);
       const contacts = getPlaceContacts(place);
@@ -974,8 +984,10 @@ export class UIController {
       const jbId = box.dataset.jambaseId;
       const listEl = box.querySelector('.jb-card-shows-list');
       if (!jbId || !listEl) return;
+      const token = String(Number(listEl.dataset.showsGeneration || '0') + 1);
+      listEl.dataset.showsGeneration = token;
       JamBaseService.fetchUpcomingShows(jbId, false).then((shows) => {
-        if (this.disposed || !listEl.isConnected) return;
+        if (this.disposed || !listEl.isConnected || listEl.dataset.showsGeneration !== token) return;
         this.renderSidebarJamBaseShows(listEl, shows);
       });
     });
@@ -1040,20 +1052,32 @@ export class UIController {
     const banner = this.elements.legacyRecoveryBanner;
     const message = this.elements.legacyRecoveryMessage;
     const restoreBtn = this.elements.restoreLegacyBtn;
+    const downloadBtn = this.elements.exportDeviceRecoveryBtn;
+    const orphanList = this.elements.legacyOwnerOrphanList;
     if (!banner) return;
     const leftoverUnapplied = Boolean(status.leftoverUnapplied);
     const leftoverAdoptable = status.leftoverAdoptable == null
       ? leftoverUnapplied
       : Boolean(status.leftoverAdoptable);
-    const ownerOrphans = Array.isArray(status.ownerOrphans) ? status.ownerOrphans.length : 0;
+    const ownerOrphans = Array.isArray(status.ownerOrphans) ? status.ownerOrphans : [];
     const deviceOrphans = Array.isArray(status.deviceOrphans) ? status.deviceOrphans.length : 0;
-    const needsAttention = leftoverUnapplied || ownerOrphans > 0 || deviceOrphans > 0;
+    const ambiguousLeftovers = Array.isArray(status.ambiguousLeftovers) ? status.ambiguousLeftovers : [];
+    const rollbackIncomplete = Boolean(status.importRollbackIncomplete);
+    const needsAttention = leftoverUnapplied
+      || ownerOrphans.length > 0
+      || deviceOrphans > 0
+      || ambiguousLeftovers.length > 0
+      || rollbackIncomplete;
     if (!needsAttention) {
       banner.classList.add('hidden');
+      if (orphanList) orphanList.innerHTML = '';
       return;
     }
     banner.classList.remove('hidden');
     const parts = [];
+    if (rollbackIncomplete) {
+      parts.push('A previous import did not finish rolling back. Download a recovery file and review this device before continuing.');
+    }
     if (leftoverAdoptable && !status.locksAvailable) {
       parts.push('Previous neighborhood data is still on this device and was not applied automatically (this browser cannot take a Web Lock).');
     } else if (leftoverAdoptable) {
@@ -1061,8 +1085,11 @@ export class UIController {
     } else if (leftoverUnapplied) {
       parts.push('Previous neighborhood data is still on this device and cannot be restored into this account. Download a recovery file.');
     }
-    if (ownerOrphans > 0) {
-      parts.push(`${ownerOrphans} leftover record(s) belong to this account.`);
+    if (ambiguousLeftovers.length > 0) {
+      parts.push('Newer leftover data was written after the last upgrade and was not applied. Download a recovery file.');
+    }
+    if (ownerOrphans.length > 0) {
+      parts.push(`${ownerOrphans.length} leftover record(s) belong to this account.`);
     }
     if (deviceOrphans > 0) {
       parts.push(`${deviceOrphans} device-level leftover record(s) are not bound to this account.`);
@@ -1071,6 +1098,33 @@ export class UIController {
     if (restoreBtn) {
       restoreBtn.classList.toggle('hidden', !leftoverAdoptable);
       restoreBtn.disabled = leftoverAdoptable && !status.locksAvailable;
+    }
+    const showDeviceDownload = deviceOrphans > 0
+      || ambiguousLeftovers.length > 0
+      || leftoverUnapplied
+      || leftoverAdoptable
+      || rollbackIncomplete;
+    if (downloadBtn) {
+      downloadBtn.classList.toggle('hidden', !showDeviceDownload);
+    }
+    if (orphanList) {
+      orphanList.innerHTML = ownerOrphans.map((orphan) => {
+        const label = this.escapeHtml(
+          orphan.preview?.homeName
+          || (Array.isArray(orphan.preview?.placeNames) && orphan.preview.placeNames[0])
+          || orphan.key
+          || 'leftover',
+        );
+        const key = this.escapeHtml(orphan.key || '');
+        return `<div class="legacy-owner-orphan-row" data-orphan-key="${key}">
+          <span>${label}</span>
+          <span class="legacy-recovery-actions">
+            <button type="button" class="btn btn-secondary btn-sm" data-orphan-action="preview" data-orphan-key="${key}">Preview</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-orphan-action="merge" data-orphan-key="${key}">Merge</button>
+            <button type="button" class="btn btn-accent btn-sm" data-orphan-action="replace" data-orphan-key="${key}">Replace</button>
+          </span>
+        </div>`;
+      }).join('');
     }
   }
 

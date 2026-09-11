@@ -640,9 +640,11 @@ export class MapboxService {
 
           const renderShows = async (force = false) => {
             if (this.tornDown || !showsBody) return;
+            const token = String(Number(showsBody.dataset.showsGeneration || '0') + 1);
+            showsBody.dataset.showsGeneration = token;
             if (force) showsBody.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
             const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
-            if (this.tornDown || !showsBody) return;
+            if (this.tornDown || !showsBody || showsBody.dataset.showsGeneration !== token) return;
             if (shows && shows.length > 0) {
               showsBody.innerHTML = shows.map(s => `
                 <p style="font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; margin-top: 3px; font-weight: ${s.isToday ? '700' : '400'};">

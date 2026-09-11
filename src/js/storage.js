@@ -529,6 +529,13 @@ function leftoverClaimCompletedForOwner(inspected, namespaceId) {
   return status === 'migrated' || status === 'orphaned';
 }
 
+function leftoverCompletedFingerprintMismatch(inspected, leftover) {
+  if (inspected.kind !== 'valid' || leftover == null) return false;
+  const status = claimStatus(inspected.claim);
+  if (status !== 'migrated' && status !== 'orphaned') return false;
+  return !matchesCopiedValue(leftover, inspected.claim.fingerprint);
+}
+
 /**
  * Pending leftover this owner still needs to restore, dismiss, or quarantine.
  * Dest occupancy does not clear this: a write into an empty namespace must not
@@ -543,6 +550,7 @@ function leftoverUnappliedForOwner(anonymous, ownerId) {
     if (leftover == null) continue;
     const inspected = inspectMigrationClaim(suffix);
     if (leftoverClaimIsForeign(inspected, namespaceId)) continue;
+    if (leftoverCompletedFingerprintMismatch(inspected, leftover)) continue;
     if (leftoverClaimCompletedForOwner(inspected, namespaceId)) continue;
     return true;
   }
@@ -559,6 +567,7 @@ function leftoverAdoptableForOwner(anonymous, ownerId) {
     const leftover = readItem(legacyKey);
     if (leftover == null) continue;
     const inspected = inspectMigrationClaim(suffix);
+    if (leftoverCompletedFingerprintMismatch(inspected, leftover)) continue;
     if (inspected.kind === 'absent') return true;
     if (inspected.kind === 'valid' && inspected.claim.namespaceId === namespaceId) {
       const status = claimStatus(inspected.claim);
@@ -566,6 +575,25 @@ function leftoverAdoptableForOwner(anonymous, ownerId) {
     }
   }
   return false;
+}
+
+function listAmbiguousLegacyWorkingCopies() {
+  return Object.entries(LEGACY_WORKING_COPY_KEYS).map(([suffix, legacyKey]) => {
+    const raw = readItem(legacyKey);
+    if (raw == null) return null;
+    const inspected = inspectMigrationClaim(suffix);
+    if (!leftoverCompletedFingerprintMismatch(inspected, raw)) return null;
+    return {
+      key: legacyKey,
+      suffix,
+      raw,
+      claimKind: inspected.kind,
+      claim: inspected.kind === 'valid' ? inspected.claim : null,
+      recoveredFrom: 'completed-claim-fingerprint-mismatch',
+      deviceLevel: true,
+      ...leftoverPreview(suffix, raw),
+    };
+  }).filter(Boolean);
 }
 
 /**
@@ -711,27 +739,41 @@ export async function withLegacyMigrationWebLock(fn) {
   return { lockUnavailable: true };
 }
 
-async function withMutationWebLock(service, fn) {
-  if ((service._mutationLockDepth || 0) > 0 || exclusiveMigrationDepth > 0) {
-    return await Promise.resolve(fn());
+const IMPORT_JOURNAL_KEY = 'neighborhood_guru:import-journal';
+
+function mutationLockError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+/**
+ * Exclusive mutation lock. Public imports always request `navigator.locks`.
+ * Nested helpers may re-enter only with the unforgeable token issued inside
+ * the held callback — never via a service-wide depth counter.
+ */
+async function withMutationWebLock(service, fn, { nestedToken } = {}) {
+  if (nestedToken && service._activeMutationToken === nestedToken) {
+    return await Promise.resolve(fn(nestedToken));
   }
   if (!webMigrationLocksAvailable()) {
-    const error = new Error('mutation-lock-unavailable');
-    error.code = 'mutation-lock-unavailable';
-    throw error;
+    throw mutationLockError('mutation-lock-unavailable');
   }
   const result = await withLegacyMigrationWebLock(async () => {
-    service._mutationLockDepth = (service._mutationLockDepth || 0) + 1;
+    const token = mintNonce();
+    const previous = service._activeMutationToken;
+    service._activeMutationToken = token;
     try {
-      return await Promise.resolve(fn());
+      return await Promise.resolve(fn(token));
     } finally {
-      service._mutationLockDepth -= 1;
+      service._activeMutationToken = previous;
     }
   });
-  if (result && (result.lockRejected || result.lockUnavailable)) {
-    const error = new Error(result.lockRejected ? 'mutation-lock-rejected' : 'mutation-lock-unavailable');
-    error.code = result.lockRejected ? 'mutation-lock-rejected' : 'mutation-lock-unavailable';
-    throw error;
+  if (result && result.lockRejected) {
+    throw mutationLockError('mutation-lock-rejected');
+  }
+  if (result && result.lockUnavailable) {
+    throw mutationLockError('mutation-lock-unavailable');
   }
   return result;
 }
@@ -742,34 +784,97 @@ function snapshotStorageSubset(keys) {
   return snap;
 }
 
-function restoreStorageSubset(snap, writtenKeys = []) {
-  for (const [key, value] of Object.entries(snap)) {
+function applyStoredValue(key, value) {
+  if (value == null) removeItem(key);
+  else writeItem(key, value);
+}
+
+/**
+ * Restore only keys this import still owns. If another writer changed a key
+ * after our write, leave that newer value in place.
+ */
+function restoreWrittenKeysIfUnchanged(snapshot, attempted) {
+  let complete = true;
+  for (const [key, original] of Object.entries(snapshot)) {
+    const current = readItem(key);
+    const ours = attempted.has(key) ? attempted.get(key) : undefined;
+    if (ours === undefined) continue;
+    if (current !== ours && current !== original) continue;
     try {
-      if (value == null) removeItem(key);
-      else writeItem(key, value);
+      applyStoredValue(key, original);
+      const expected = original == null ? null : original;
+      if (readItem(key) !== expected) complete = false;
     } catch {
-      // Best-effort rollback.
+      complete = false;
     }
   }
-  for (const key of writtenKeys) {
-    if (Object.prototype.hasOwnProperty.call(snap, key)) continue;
+  for (const [key, ours] of attempted) {
+    if (Object.prototype.hasOwnProperty.call(snapshot, key)) continue;
+    const current = readItem(key);
+    if (current !== ours) continue;
     try {
       removeItem(key);
+      if (readItem(key) != null) complete = false;
     } catch {
-      // Best-effort rollback.
+      complete = false;
     }
+  }
+  return complete;
+}
+
+function storageMatchesSnapshot(snap, attempted = new Map()) {
+  for (const [key, value] of Object.entries(snap)) {
+    const current = readItem(key);
+    const ours = attempted.has(key) ? attempted.get(key) : undefined;
+    if (ours !== undefined && current !== ours && current !== value) continue;
+    if (current !== value) return false;
+  }
+  for (const [key, ours] of attempted) {
+    if (Object.prototype.hasOwnProperty.call(snap, key)) continue;
+    const current = readItem(key);
+    if (current !== ours && current != null) continue;
+    if (current != null) return false;
+  }
+  return true;
+}
+
+function readImportJournal() {
+  return parseJsonOr(readItem(IMPORT_JOURNAL_KEY), null);
+}
+
+function writeImportJournal(entry) {
+  try {
+    writeItem(IMPORT_JOURNAL_KEY, JSON.stringify(entry));
+  } catch {
+    // Best-effort durable failure marker.
   }
 }
 
-function storageMatchesSnapshot(snap, writtenKeys = []) {
-  for (const [key, value] of Object.entries(snap)) {
-    if (readItem(key) !== value) return false;
+function clearImportJournal() {
+  try {
+    removeItem(IMPORT_JOURNAL_KEY);
+  } catch {
+    // Ignore.
   }
-  for (const key of writtenKeys) {
-    if (Object.prototype.hasOwnProperty.call(snap, key)) continue;
-    if (readItem(key) != null) return false;
-  }
-  return true;
+}
+
+function importOutcome(ok, reason) {
+  return ok ? { ok: true } : { ok: false, reason };
+}
+
+function normalizeImportedPlaces(places) {
+  const seen = new Set();
+  return places.map((place) => {
+    if (!place || typeof place !== 'object' || Array.isArray(place)) return place;
+    const id = place.id != null ? String(place.id).trim() : '';
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      return place;
+    }
+    const next = { ...place, id: mintPlaceId() };
+    seen.add(next.id);
+    return next;
+  });
 }
 
 function leftoverPreview(suffix, raw) {
@@ -917,7 +1022,8 @@ function removeWorkingCopy(anonymous, ownerId, suffix) {
 export const StorageService = {
   _ownerId: ANONYMOUS_OWNER_ID,
   _anonymous: true,
-  _mutationLockDepth: 0,
+  _activeMutationToken: null,
+  _ownerGeneration: 0,
 
   getOwnerId() {
     return this._anonymous ? ANONYMOUS_OWNER_ID : this._ownerId;
@@ -945,6 +1051,7 @@ export const StorageService = {
       this._anonymous = false;
       this._ownerId = ownerId;
     }
+    this._ownerGeneration = (this._ownerGeneration || 0) + 1;
     if (migrate) {
       runFailClosedLegacyMigration(this._anonymous, this._ownerId);
     }
@@ -959,19 +1066,22 @@ export const StorageService = {
     const anonymous = this._anonymous;
     const ownerId = this._ownerId;
     const namespaceId = namespaceIdFor(anonymous, ownerId);
-    if (webMigrationLocksAvailable()) {
-      await withLegacyMigrationWebLock(() => {
-        const liveNamespaceId = namespaceIdFor(this._anonymous, this._ownerId);
-        if (liveNamespaceId !== namespaceId) {
-          runOwnerMismatchFailClosed();
-          return { ok: true };
-        }
-        runExclusiveLegacyMigration(anonymous, ownerId);
-        return { ok: true };
-      });
-      return;
+    if (!webMigrationLocksAvailable()) {
+      runFailClosedLegacyMigration(anonymous, ownerId);
+      return importOutcome(false, 'lock-unavailable');
     }
-    runFailClosedLegacyMigration(anonymous, ownerId);
+    const result = await withLegacyMigrationWebLock(() => {
+      const liveNamespaceId = namespaceIdFor(this._anonymous, this._ownerId);
+      if (liveNamespaceId !== namespaceId) {
+        runOwnerMismatchFailClosed();
+        return importOutcome(false, 'owner-changed');
+      }
+      runExclusiveLegacyMigration(anonymous, ownerId);
+      return { ok: true };
+    });
+    if (result && result.lockRejected) return importOutcome(false, 'lock-rejected');
+    if (result && result.lockUnavailable) return importOutcome(false, 'lock-unavailable');
+    return result && result.ok ? { ok: true } : (result || { ok: true });
   },
 
   listPendingLegacyWorkingCopies() {
@@ -980,14 +1090,18 @@ export const StorageService = {
 
   legacyMigrationStatus() {
     const leftovers = this.listPendingLegacyWorkingCopies();
+    const ambiguousLeftovers = listAmbiguousLegacyWorkingCopies();
+    const journal = readImportJournal();
     return {
       leftoverPresent: leftoverExists(),
       leftoverUnapplied: leftoverUnappliedForOwner(this._anonymous, this._ownerId),
       leftoverAdoptable: leftoverAdoptableForOwner(this._anonymous, this._ownerId),
       locksAvailable: webMigrationLocksAvailable(),
       leftovers,
+      ambiguousLeftovers,
       ownerOrphans: this.listOrphanedWorkingCopies(),
       deviceOrphans: this.listDeviceOrphanedWorkingCopies(),
+      importRollbackIncomplete: Boolean(journal && journal.status === 'rollback-incomplete'),
     };
   },
 
@@ -1301,15 +1415,16 @@ export const StorageService = {
       exportedAt: new Date().toISOString(),
       warning: 'These records are not bound to the signed-in account. Review before restoring.',
       pendingLegacyWorkingCopies: this.listPendingLegacyWorkingCopies(),
+      ambiguousLegacyWorkingCopies: listAmbiguousLegacyWorkingCopies(),
       deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
     }, null, 2);
   },
 
   /**
-   * Import neighborhood JSON into the current namespace. Single-tab: working-copy
-   * writers (savePlace / setHomeAddress / …) do not take this mutation lock, so
-   * concurrent same-key writes from another tab are not CAS-protected. Rollback
-   * snapshots only keys this import mutates so unrelated storage is left intact.
+   * Import neighborhood JSON into the namespace that initiated the call.
+   * Owner/namespace are snapshotted before the Web Lock; a later owner flip
+   * aborts without writing. Rollback restores a key only if it still holds
+   * this import's write.
    */
   async importDataJSON(jsonStr) {
     let data;
@@ -1317,13 +1432,17 @@ export const StorageService = {
       data = JSON.parse(jsonStr);
     } catch (e) {
       console.error('Failed to parse import JSON', e);
-      return false;
+      return importOutcome(false, 'invalid-document');
     }
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return importOutcome(false, 'invalid-document');
+    }
     if (data.homeAddress != null && (typeof data.homeAddress !== 'object' || Array.isArray(data.homeAddress))) {
-      return false;
+      return importOutcome(false, 'invalid-document');
     }
-    if (data.savedPlaces != null && !Array.isArray(data.savedPlaces)) return false;
+    if (data.savedPlaces != null && !Array.isArray(data.savedPlaces)) {
+      return importOutcome(false, 'invalid-document');
+    }
 
     const preparedOrphans = [];
     const orphans = Array.isArray(data.orphanedWorkingCopies) ? data.orphanedWorkingCopies : [];
@@ -1355,37 +1474,51 @@ export const StorageService = {
       });
     }
 
+    const ownerSnapshot = {
+      anonymous: this._anonymous,
+      ownerId: this._ownerId,
+      namespaceId: this.getNamespaceId(),
+      generation: this._ownerGeneration || 0,
+    };
+    const savedPlaces = Array.isArray(data.savedPlaces) ? normalizeImportedPlaces(data.savedPlaces) : null;
+
     try {
-      return await withMutationWebLock(this, async () => {
-        const namespaceId = this.getNamespaceId();
+      return await withMutationWebLock(this, async (token) => {
+        void token;
+        if (
+          this._anonymous !== ownerSnapshot.anonymous
+          || this._ownerId !== ownerSnapshot.ownerId
+          || this.getNamespaceId() !== ownerSnapshot.namespaceId
+          || (this._ownerGeneration || 0) !== ownerSnapshot.generation
+        ) {
+          return importOutcome(false, 'owner-changed');
+        }
+        migrationInterleave('after-import-lock', { namespaceId: ownerSnapshot.namespaceId });
+
+        const { anonymous, ownerId, namespaceId } = ownerSnapshot;
         const mutatingKeys = [];
-        if (data.homeAddress) {
-          mutatingKeys.push(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS));
-        }
-        if (Array.isArray(data.savedPlaces)) {
-          mutatingKeys.push(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES));
-        }
-        for (const orphan of preparedOrphans) {
-          mutatingKeys.push(orphan.preferredKey);
-        }
+        const homeKey = namespaceKey(anonymous, ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
+        const placesKey = namespaceKey(anonymous, ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
+        if (data.homeAddress) mutatingKeys.push(homeKey);
+        if (savedPlaces) mutatingKeys.push(placesKey);
+        for (const orphan of preparedOrphans) mutatingKeys.push(orphan.preferredKey);
+
         const snapshot = snapshotStorageSubset(mutatingKeys);
-        const writtenKeys = [];
+        const attempted = new Map();
         try {
           if (data.homeAddress) {
-            const key = namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
             const raw = JSON.stringify(data.homeAddress);
-            if (!writeItemVerified(key, raw)) {
+            attempted.set(homeKey, raw);
+            if (!writeItemVerified(homeKey, raw)) {
               throw new Error('home-write-failed');
             }
-            writtenKeys.push(key);
           }
-          if (Array.isArray(data.savedPlaces)) {
-            const key = namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
-            const raw = JSON.stringify(data.savedPlaces);
-            if (!writeItemVerified(key, raw)) {
+          if (savedPlaces) {
+            const raw = JSON.stringify(savedPlaces);
+            attempted.set(placesKey, raw);
+            if (!writeItemVerified(placesKey, raw)) {
               throw new Error('places-write-failed');
             }
-            writtenKeys.push(key);
           }
           for (const orphan of preparedOrphans) {
             const envelope = wrapOrphanEnvelope(
@@ -1395,22 +1528,32 @@ export const StorageService = {
               orphan.recoveredFrom,
             );
             const written = await commitImportedOrphan(orphan, envelope, namespaceId);
-            if (written) writtenKeys.push(written);
+            if (written) attempted.set(written, envelope);
           }
-          return true;
+          clearImportJournal();
+          return { ok: true };
         } catch (e) {
-          restoreStorageSubset(snapshot, writtenKeys);
-          if (!storageMatchesSnapshot(snapshot, writtenKeys)) {
+          const rolled = restoreWrittenKeysIfUnchanged(snapshot, attempted);
+          if (!rolled || !storageMatchesSnapshot(snapshot, attempted)) {
+            writeImportJournal({
+              status: 'rollback-incomplete',
+              namespaceId,
+              at: Date.now(),
+              keys: [...attempted.keys()],
+            });
             console.error('Failed to roll back neighborhood import');
+            return importOutcome(false, 'rollback-incomplete');
           }
-          return false;
+          return importOutcome(false, e?.message === 'home-write-failed' || e?.message === 'places-write-failed' || e?.message === 'orphan-write-failed'
+            ? 'write-failed'
+            : 'write-failed');
         }
       });
     } catch (e) {
-      if (e?.code !== 'mutation-lock-unavailable' && e?.code !== 'mutation-lock-rejected') {
-        console.error('Failed to import JSON', e);
-      }
-      return false;
+      if (e?.code === 'mutation-lock-unavailable') return importOutcome(false, 'lock-unavailable');
+      if (e?.code === 'mutation-lock-rejected') return importOutcome(false, 'lock-rejected');
+      console.error('Failed to import JSON', e);
+      return importOutcome(false, 'write-failed');
     }
   }
 };
@@ -1420,6 +1563,7 @@ export function createStorageService() {
   const service = Object.create(StorageService);
   service._ownerId = ANONYMOUS_OWNER_ID;
   service._anonymous = true;
-  service._mutationLockDepth = 0;
+  service._activeMutationToken = null;
+  service._ownerGeneration = 0;
   return service;
 }

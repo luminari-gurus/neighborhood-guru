@@ -1226,7 +1226,7 @@ describe('owner-switch presentation isolation', () => {
         this.editBtn = { onclick: null };
         this.refreshBtn = { onclick: null };
         this.addBtn = { onclick: null };
-        this.showsBody = { innerHTML: '' };
+        this.showsBody = { innerHTML: '', dataset: {} };
         popups.push(this);
       }
       setHTML() { return this; }
@@ -1313,5 +1313,181 @@ describe('owner-switch presentation isolation', () => {
       globalThis.document = previousDocument;
       JamBaseService.fetchUpcomingShows = originalFetchShows;
     }
+  });
+
+  test('older popup JamBase responses do not overwrite a newer open', async () => {
+    const mapboxgl = (await import('mapbox-gl')).default;
+    const { MapboxService } = await import('../src/js/mapbox-service.js');
+    const original = { Popup: mapboxgl.Popup, Marker: mapboxgl.Marker };
+    const popups = [];
+    mapboxgl.Popup = class FakePopup {
+      constructor() {
+        this.listeners = [];
+        this.editBtn = { onclick: null };
+        this.refreshBtn = { onclick: null };
+        this.showsBody = { innerHTML: '', dataset: {} };
+        popups.push(this);
+      }
+      setHTML() { return this; }
+      on(type, fn) { this.listeners.push({ type, fn }); return this; }
+      getElement() {
+        return {
+          querySelector: (sel) => {
+            const value = String(sel);
+            if (value.includes('popup-edit-btn')) return this.editBtn;
+            if (value.includes('popup-refresh-jb-btn')) return this.refreshBtn;
+            if (value.includes('jb-popup-shows-body')) return this.showsBody;
+            return null;
+          },
+        };
+      }
+      remove() {}
+      emitOpen() {
+        this.listeners.filter((entry) => entry.type === 'open').forEach((entry) => entry.fn());
+      }
+    };
+    mapboxgl.Marker = class FakeMarker {
+      setLngLat() { return this; }
+      setPopup() { return this; }
+      addTo() { return this; }
+      remove() {}
+    };
+    const previousDocument = globalThis.document;
+    globalThis.document = { createElement() { return { className: '', style: {}, innerHTML: '', title: '', addEventListener() {} }; } };
+    const originalFetchShows = JamBaseService.fetchUpcomingShows;
+    const deferred = [];
+    JamBaseService.fetchUpcomingShows = () => new Promise((resolve) => { deferred.push(resolve); });
+    try {
+      const service = new MapboxService();
+      service.tornDown = false;
+      service.map = { loaded: true };
+      service.renderSavedMarkers([{ ...PLACE_A, jambaseId: 'venue-1' }]);
+      const popup = popups[0];
+      popup.emitOpen();
+      popup.emitOpen();
+      expect(deferred).toHaveLength(2);
+      deferred[1]([{ title: 'NEW', date: 'Fri', isToday: false, url: 'https://example.test/new' }]);
+      await Promise.resolve();
+      deferred[0]([{ title: 'OLD', date: 'Thu', isToday: false, url: 'https://example.test/old' }]);
+      await Promise.resolve();
+      expect(popup.showsBody.innerHTML).toContain('NEW');
+      expect(popup.showsBody.innerHTML).not.toContain('OLD');
+      service.teardownMap?.();
+    } finally {
+      mapboxgl.Popup = original.Popup;
+      mapboxgl.Marker = original.Marker;
+      globalThis.document = previousDocument;
+      JamBaseService.fetchUpcomingShows = originalFetchShows;
+    }
+  });
+
+  test('duplicate place cards keep distinct delegated edit targets', () => {
+    const ui = new UIController();
+    const opened = [];
+    const cards = [];
+    const list = {
+      innerHTML: '',
+      handler: null,
+      addEventListener(type, handler) { this.handler = handler; },
+      removeEventListener() {},
+      appendChild(node) { cards.push(node); },
+      querySelectorAll() { return []; },
+    };
+    ui.elements.savedPlacesList = list;
+    ui.elements.placesCountBadge = { textContent: '' };
+    ui.bindDelegatedEvents();
+    const previous = globalThis.document;
+    globalThis.document = {
+      createElement() {
+        return {
+          className: '',
+          dataset: {},
+          style: {},
+          innerHTML: '',
+        };
+      },
+    };
+    try {
+      ui.renderPlacesList([
+        { ...PLACE_A, id: 'dup', name: 'First' },
+        { ...PLACE_A, id: 'dup', name: 'Second' },
+      ], null, (place) => opened.push(place.name));
+      expect(cards).toHaveLength(2);
+      expect(ui._placesByToken.size).toBe(2);
+      const firstCard = cards[0];
+      const click = {
+        stopPropagation() {},
+        target: {
+          closest(selector) {
+            if (selector === '.card-refresh-jb-btn') return null;
+            if (selector === 'a') return null;
+            if (selector === '.edit-place-btn') return { closest: () => this };
+            if (selector === '.fly-place-btn') return null;
+            if (selector === '.place-card') return firstCard;
+            return null;
+          },
+        },
+      };
+      list.handler?.(click);
+      expect(opened).toEqual(['First']);
+    } finally {
+      globalThis.document = previous;
+    }
+  });
+
+  test('stale leftover restore does not refresh the replacement owner', async () => {
+    const locks = installHoldableWebLocks();
+    try {
+      const ui = createStubUi();
+      StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+      const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+      app.syncNeighborhoodViewFromStorage();
+      let syncs = 0;
+      const originalSync = app.syncNeighborhoodViewFromStorage.bind(app);
+      app.syncNeighborhoodViewFromStorage = (...args) => {
+        syncs += 1;
+        return originalSync(...args);
+      };
+      locks.hold();
+      const restore = app.handleRestoreLegacyLeftover();
+      await auth.signIn({ session: SESSION_B });
+      expect(app.storage.getOwnerId()).toBe(SESSION_B.user.id);
+      const syncsAfterSwitch = syncs;
+      locks.releaseAll();
+      await restore;
+      await app.unsubscribeWorkingCopy.ready;
+      expect(app.storage.getOwnerId()).toBe(SESSION_B.user.id);
+      expect(syncs).toBe(syncsAfterSwitch + 1);
+      expect(ui.toasts.some((message) => String(message).includes('Leftover data is still on this device'))).toBe(false);
+    } finally {
+      globalThis.navigator = locks.previous;
+    }
+  });
+
+  test('owner-bound orphan banner exposes merge and replace actions', () => {
+    const ui = new UIController();
+    const classes = new Set(['hidden']);
+    ui.elements.legacyRecoveryBanner = {
+      classList: {
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+      },
+    };
+    ui.elements.legacyRecoveryMessage = { textContent: '' };
+    ui.elements.restoreLegacyBtn = { disabled: false, classList: { toggle() {} } };
+    ui.elements.exportDeviceRecoveryBtn = { classList: { hidden: false, toggle(name, force) { this.hidden = force; } } };
+    ui.elements.legacyOwnerOrphanList = { innerHTML: '' };
+    ui.updateLegacyRecoveryBanner({
+      leftoverUnapplied: false,
+      leftoverAdoptable: false,
+      locksAvailable: true,
+      ownerOrphans: [{ key: 'neighborhood_guru:orphaned:home_address', preview: { homeName: 'Alice orphan' } }],
+      deviceOrphans: [],
+      ambiguousLeftovers: [],
+    });
+    expect(classes.has('hidden')).toBe(false);
+    expect(ui.elements.legacyOwnerOrphanList.innerHTML).toContain('Alice orphan');
+    expect(ui.elements.legacyOwnerOrphanList.innerHTML).toContain('data-orphan-action="merge"');
+    expect(ui.elements.exportDeviceRecoveryBtn.classList.hidden).toBe(true);
   });
 });

@@ -116,6 +116,10 @@ function orphanPayload(suffix) {
   return parseOrphanStored(stored).payload;
 }
 
+function importOk(result) {
+  return result === true || result?.ok === true;
+}
+
 function writeOwnerOrphan(suffix, value, namespaceId) {
   const key = orphanedWorkingCopyKey(suffix);
   localStorage.setItem(key, JSON.stringify({
@@ -457,7 +461,7 @@ describe('namespaced browser storage', () => {
       savedPlaces: [userPlace({ name: 'Imported place' })],
     };
 
-    expect(await StorageService.importDataJSON(JSON.stringify(backup))).toBe(true);
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify(backup)))).toBe(true);
     expect(StorageService.getHomeAddress().name).toBe('Imported');
 
     StorageService.setOwner(SESSION_B.user.id);
@@ -1081,7 +1085,7 @@ describe('namespaced browser storage', () => {
     expect(orphan.raw).toBe(raw);
 
     localStorage.removeItem(key);
-    expect(await StorageService.importDataJSON(JSON.stringify(exported))).toBe(true);
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify(exported)))).toBe(true);
     const restored = StorageService.listOrphanedWorkingCopies().find((item) => item.raw === raw);
     expect(restored?.raw).toBe(raw);
     expect(restored?.key?.startsWith('neighborhood_guru:orphaned:')).toBe(true);
@@ -1294,7 +1298,7 @@ describe('namespaced browser storage', () => {
         store.setItem(key, value);
       },
     });
-    expect(await StorageService.importDataJSON(JSON.stringify({
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify({
       version: 1,
       homeAddress: { name: 'After', lat: 9, lng: 9 },
       savedPlaces: [],
@@ -1304,7 +1308,7 @@ describe('namespaced browser storage', () => {
         namespaceId: `user:${SESSION_B.user.id}`,
         raw: JSON.stringify({ name: 'Bob overwrite', lat: 9, lng: 9 }),
       }],
-    }))).toBe(false);
+    })))).toBe(false);
     const after = {};
     for (let i = 0; i < inner.length; i += 1) {
       const key = inner.key(i);
@@ -1325,7 +1329,7 @@ describe('namespaced browser storage', () => {
     );
     const aliceKey = orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS);
     StorageService.setOwner(SESSION_B.user.id);
-    expect(await StorageService.importDataJSON(JSON.stringify({
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify({
       version: 1,
       orphanedWorkingCopies: [{
         key: aliceKey,
@@ -1333,7 +1337,7 @@ describe('namespaced browser storage', () => {
         namespaceId: `user:${SESSION_B.user.id}`,
         raw: JSON.stringify({ name: 'Bob overwrite', lat: 9, lng: 9 }),
       }],
-    }))).toBe(true);
+    })))).toBe(true);
     const stored = JSON.parse(localStorage.getItem(aliceKey));
     expect(JSON.parse(stored.raw).name).toBe('Alice hidden');
     expect(stored.namespaceId).toBe(`user:${SESSION_A.user.id}`);
@@ -1463,8 +1467,8 @@ describe('namespaced browser storage', () => {
       alice.importDataJSON(payload('Alice recovery')),
       bob.importDataJSON(payload('Bob recovery')),
     ]);
-    expect(aliceOk).toBe(true);
-    expect(bobOk).toBe(true);
+    expect(aliceOk).toMatchObject({ ok: true });
+    expect(bobOk).toMatchObject({ ok: true });
     alice.setOwner(SESSION_A.user.id, { migrate: false });
     bob.setOwner(SESSION_B.user.id, { migrate: false });
     const aliceRecords = alice.listOrphanedWorkingCopies().map((item) => item.preview?.homeName);
@@ -1515,7 +1519,7 @@ describe('namespaced browser storage', () => {
 
     releaseAlice();
     const [aliceOk, bobOk] = await Promise.all([alicePromise, bobPromise]);
-    expect({ aliceOk, bobOk }).toEqual({ aliceOk: true, bobOk: true });
+    expect({ aliceOk: aliceOk?.ok, bobOk: bobOk?.ok }).toEqual({ aliceOk: true, bobOk: true });
     alice.setOwner(SESSION_A.user.id, { migrate: false });
     bob.setOwner(SESSION_B.user.id, { migrate: false });
     const records = [
@@ -1533,11 +1537,12 @@ describe('namespaced browser storage', () => {
     StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
     const before = snapshotStorage();
     globalThis.navigator = { ...(globalThis.navigator || {}), locks: undefined };
-    expect(await StorageService.importDataJSON(JSON.stringify({
+    const unavailable = await StorageService.importDataJSON(JSON.stringify({
       version: 1,
       homeAddress: { name: 'After', lat: 2, lng: 2 },
       savedPlaces: [userPlace({ name: 'After place' })],
-    }))).toBe(false);
+    }));
+    expect(unavailable).toMatchObject({ ok: false, reason: 'lock-unavailable' });
     expect(snapshotStorage()).toEqual(before);
   });
 
@@ -1556,7 +1561,7 @@ describe('namespaced browser storage', () => {
     expect(await StorageService.importDataJSON(JSON.stringify({
       version: 1,
       homeAddress: { name: 'After', lat: 2, lng: 2 },
-    }))).toBe(false);
+    }))).toMatchObject({ ok: false, reason: 'lock-rejected' });
     expect(snapshotStorage()).toEqual(before);
   });
 
@@ -1574,11 +1579,11 @@ describe('namespaced browser storage', () => {
         store.setItem(key, value);
       },
     });
-    expect(await StorageService.importDataJSON(JSON.stringify({
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify({
       version: 1,
       homeAddress: { name: 'After', lat: 2, lng: 2 },
       savedPlaces: [userPlace({ name: 'After place' })],
-    }))).toBe(false);
+    })))).toBe(false);
     globalThis.localStorage = inner;
     expect(inner.getItem('unrelated_keep')).toBe('stay');
     expect(inner.getItem(
@@ -1597,11 +1602,11 @@ describe('namespaced browser storage', () => {
         store.setItem(key, value);
       },
     });
-    expect(await StorageService.importDataJSON(JSON.stringify({
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify({
       version: 1,
       homeAddress: { name: 'After', lat: 2, lng: 2 },
       savedPlaces: [userPlace({ name: 'After place' })],
-    }))).toBe(false);
+    })))).toBe(false);
     globalThis.localStorage = inner;
     expect(snapshotStorage(inner)).toEqual(before);
   });
@@ -1621,7 +1626,7 @@ describe('namespaced browser storage', () => {
     });
     let writes = 0;
     globalThis.__NG_STORAGE_WRITE_HOOK__ = () => { writes += 1; };
-    expect(await StorageService.importDataJSON(doc)).toBe(true);
+    expect(importOk(await StorageService.importDataJSON(doc))).toBe(true);
     const writeCount = writes;
     expect(writeCount).toBeGreaterThan(1);
     globalThis.__NG_STORAGE_WRITE_HOOK__ = undefined;
@@ -1636,9 +1641,131 @@ describe('namespaced browser storage', () => {
         n += 1;
         if (n === failAt) throw new Error(`import-write-failed:${failAt}`);
       };
-      expect(await StorageService.importDataJSON(doc)).toBe(false);
+      expect(importOk(await StorageService.importDataJSON(doc))).toBe(false);
       expect(snapshotStorage()).toEqual(before);
     }
+  });
+
+  test('queued import aborts if owner changes before the lock is granted', async () => {
+    const gated = installGatedWebLocks();
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Alice current', lat: 1, lng: 1 });
+    const pending = StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Alice backup', lat: 2, lng: 2 },
+    }));
+    const grant = await gated.waitForGrant();
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Bob home', lat: 3, lng: 3 });
+    grant();
+    expect(await pending).toMatchObject({ ok: false, reason: 'owner-changed' });
+    expect(StorageService.getHomeAddress().name).toBe('Bob home');
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    expect(StorageService.getHomeAddress().name).toBe('Alice current');
+  });
+
+  test('rollback does not clobber a concurrent write to the same key', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const homeKey = authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = ({ key, value }) => {
+      if (String(key).includes('saved_places')) {
+        localStorage.setItem(homeKey, JSON.stringify({ name: 'Concurrent', lat: 9, lng: 9 }));
+        throw new Error('places-write-failed');
+      }
+      void value;
+    };
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Imported', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'After place' })],
+    }));
+    expect(result.ok).toBe(false);
+    expect(JSON.parse(localStorage.getItem(homeKey)).name).toBe('Concurrent');
+  });
+
+  test('rollback failure returns a distinct incomplete result', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const inner = globalThis.localStorage;
+    let homeWrites = 0;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        if (String(key).includes('saved_places')) throw storageError();
+        if (String(key).includes('home_address')) {
+          homeWrites += 1;
+          if (homeWrites > 1) throw storageError();
+        }
+        store.setItem(key, value);
+      },
+    });
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Imported', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'After place' })],
+    }));
+    expect(result).toMatchObject({ ok: false, reason: 'rollback-incomplete' });
+    expect(JSON.parse(inner.getItem(
+      authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
+    )).name).toBe('Imported');
+    expect(StorageService.legacyMigrationStatus().importRollbackIncomplete).toBe(true);
+  });
+
+  test('second import on the same service waits for the Web Lock', async () => {
+    const locks = installFakeWebLocks();
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    let secondStartedDuringFirst = false;
+    let secondPromise;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase) => {
+      if (phase === 'after-import-lock' && locks.isHeld(LEGACY_MIGRATION_LOCK_NAME) && !secondPromise) {
+        secondPromise = StorageService.importDataJSON(JSON.stringify({
+          version: 1,
+          homeAddress: { name: 'Second', lat: 2, lng: 2 },
+        }));
+        secondStartedDuringFirst = locks.queuedCount(LEGACY_MIGRATION_LOCK_NAME) >= 1;
+      }
+    };
+    const first = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'First', lat: 1, lng: 1 },
+    }));
+    const second = await secondPromise;
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(secondStartedDuringFirst).toBe(true);
+    expect(StorageService.getHomeAddress().name).toBe('Second');
+  });
+
+  test('completed-claim fingerprint mismatch is ambiguous device recovery', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    const leftover = JSON.stringify({ name: 'Newer old-tab edit', lat: 9, lng: 9 });
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, leftover);
+    localStorage.setItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS), JSON.stringify({
+      nonce: 'n1',
+      namespaceId: `user:${SESSION_B.user.id}`,
+      fingerprint: JSON.stringify({ name: 'original migrated', lat: 1, lng: 1 }),
+      status: 'migrated',
+    }));
+    const status = StorageService.legacyMigrationStatus();
+    expect(status.leftoverAdoptable).toBe(false);
+    expect(status.leftoverUnapplied).toBe(false);
+    expect(status.ambiguousLeftovers.some((item) => item.preview?.homeName === 'Newer old-tab edit')).toBe(true);
+    const device = JSON.parse(StorageService.exportDeviceRecoveryJSON());
+    expect(device.ambiguousLegacyWorkingCopies.some((item) => item.preview?.homeName === 'Newer old-tab edit')).toBe(true);
+    expect(StorageService.getHomeAddress()).toBeNull();
+  });
+
+  test('import mints unique ids when a backup contains duplicate place ids', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    const dup = userPlace({ id: 'dup', name: 'First' });
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      savedPlaces: [dup, { ...dup, name: 'Second' }],
+    }));
+    expect(result.ok).toBe(true);
+    const places = StorageService.getSavedPlaces();
+    expect(places.map((place) => place.name)).toEqual(['First', 'Second']);
+    expect(new Set(places.map((place) => place.id)).size).toBe(2);
   });
 });
 
