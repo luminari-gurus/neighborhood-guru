@@ -1177,46 +1177,135 @@ describe('owner-switch presentation isolation', () => {
     expect(ui.elements.restoreLegacyBtn.disabled).toBe(true);
   });
 
+  test('disposed UI mutators do not write into mounted chrome', () => {
+    const ui = new UIController();
+    const weatherHidden = new Set();
+    const settingsHidden = new Set(['hidden']);
+    ui.elements.weatherHeaderPill = {
+      classList: {
+        add(name) { weatherHidden.add(name); },
+        remove(name) { weatherHidden.delete(name); },
+      },
+      weatherIcon: true,
+    };
+    ui.elements.weatherIcon = { textContent: '' };
+    ui.elements.weatherTemp = { textContent: '' };
+    ui.elements.weatherDesc = { textContent: '' };
+    ui.elements.settingsModal = {
+      classList: {
+        add(name) { settingsHidden.add(name); },
+        remove(name) { settingsHidden.delete(name); },
+      },
+    };
+    ui.elements.settingsMapboxToken = { value: '' };
+    ui.elements.settingsJambaseToken = { value: '' };
+    ui.elements.peopleListContainer = { innerHTML: 'keep' };
+    ui.dispose();
+    ui.updateWeatherDisplay({ icon: '☀️', temp: 70, desc: 'Fair' });
+    ui.openSettingsModal('pk.test', 'jb.test');
+    ui.renderPeopleFields(['Ada']);
+    expect(ui.elements.weatherIcon.textContent).toBe('');
+    expect(settingsHidden.has('hidden')).toBe(true);
+    expect(ui.elements.peopleListContainer.innerHTML).toBe('');
+  });
+
   test('reopening a Mapbox popup does not stack edit handlers', async () => {
+    const mapboxgl = (await import('mapbox-gl')).default;
     const { MapboxService } = await import('../src/js/mapbox-service.js');
-    const service = new MapboxService();
-    const clicks = [];
-    const popup = {
-      handlers: [],
-      element: null,
-      on(type, fn) { this.handlers.push({ type, fn }); },
-      getElement() { return this.element; },
-      remove() {},
-      setHTML() { return this; },
+    const original = { Popup: mapboxgl.Popup, Marker: mapboxgl.Marker };
+    const popups = [];
+    mapboxgl.Popup = class FakePopup {
+      constructor() {
+        this.listeners = [];
+        this.editBtn = { onclick: null };
+        this.refreshBtn = { onclick: null };
+        this.addBtn = { onclick: null };
+        this.showsBody = { innerHTML: '' };
+        popups.push(this);
+      }
+      setHTML() { return this; }
+      on(type, fn) { this.listeners.push({ type, fn }); return this; }
+      getElement() {
+        return {
+          querySelector: (sel) => {
+            const value = String(sel);
+            if (value.includes('popup-edit-btn')) return this.editBtn;
+            if (value.includes('popup-refresh-jb-btn')) return this.refreshBtn;
+            if (value.includes('temp-add-btn')) return this.addBtn;
+            if (value.includes('jb-popup-shows-body')) return this.showsBody;
+            return null;
+          },
+        };
+      }
+      remove() {}
+      emitOpen() {
+        this.listeners.filter((entry) => entry.type === 'open').forEach((entry) => entry.fn());
+      }
     };
-    popup.element = {
-      querySelector(selector) {
-        if (selector === '.popup-edit-btn') return this.editBtn;
-        return null;
-      },
-      editBtn: {
-        onclick: null,
+    mapboxgl.Marker = class FakeMarker {
+      setLngLat() { return this; }
+      setPopup() { return this; }
+      addTo() { return this; }
+      remove() {}
+    };
+    const previousDocument = globalThis.document;
+    globalThis.document = {
+      createElement() {
+        return {
+          className: '',
+          style: {},
+          innerHTML: '',
+          title: '',
+          addEventListener() {},
+        };
       },
     };
-    service.tornDown = false;
-    const open = popup.handlers.find((entry) => entry.type === 'open');
-    service.map = { loaded: true };
-    const originalPopup = popup;
-    service.renderSavedMarkers = undefined;
-    const editBtn = popup.element.editBtn;
-    const bindOpen = () => {
-      popup.handlers = [];
-      popup.on('open', () => {
-        const btn = popup.getElement().querySelector('.popup-edit-btn');
-        btn.onclick = () => clicks.push('edit');
+    const originalFetchShows = JamBaseService.fetchUpcomingShows;
+    JamBaseService.fetchUpcomingShows = async () => [];
+    try {
+      const service = new MapboxService();
+      service.tornDown = false;
+      service.map = { loaded: true };
+      const editClicks = [];
+      const addClicks = [];
+      const refreshCalls = [];
+      JamBaseService.fetchUpcomingShows = async (_id, force) => {
+        refreshCalls.push(Boolean(force));
+        return [];
+      };
+      service.renderSavedMarkers([{
+        ...PLACE_A,
+        jambaseId: 'venue-1',
+      }], (place) => {
+        editClicks.push(place.id);
       });
-    };
-    bindOpen();
-    popup.handlers.filter((entry) => entry.type === 'open').forEach((entry) => entry.fn());
-    popup.handlers.filter((entry) => entry.type === 'open').forEach((entry) => entry.fn());
-    editBtn.onclick();
-    expect({ editCallsAfterOneClick: clicks.length }).toEqual({ editCallsAfterOneClick: 1 });
-    void originalPopup;
-    service.teardownMap?.();
+      const savedPopup = popups[0];
+      savedPopup.emitOpen();
+      savedPopup.emitOpen();
+      savedPopup.editBtn.onclick();
+      savedPopup.refreshBtn.onclick({ stopPropagation() {} });
+      expect({
+        editCallsAfterOneClick: editClicks.length,
+        refreshCallsAfterOneClick: refreshCalls.filter((force) => force).length,
+      }).toEqual({
+        editCallsAfterOneClick: 1,
+        refreshCallsAfterOneClick: 1,
+      });
+
+      service.showTempMarker({ lat: 1, lng: 2 }, (coords) => {
+        addClicks.push(`${coords.lat},${coords.lng}`);
+      });
+      const tempPopup = popups[1];
+      tempPopup.emitOpen();
+      tempPopup.emitOpen();
+      tempPopup.addBtn.onclick();
+      expect(addClicks).toEqual(['1,2']);
+      service.teardownMap?.();
+    } finally {
+      mapboxgl.Popup = original.Popup;
+      mapboxgl.Marker = original.Marker;
+      globalThis.document = previousDocument;
+      JamBaseService.fetchUpcomingShows = originalFetchShows;
+    }
   });
 });

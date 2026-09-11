@@ -294,10 +294,11 @@ function mintNonce() {
 
 function migrationInterleave(phase, detail) {
   try {
-    globalThis.__NG_MIGRATION_INTERLEAVE__?.(phase, detail);
+    return globalThis.__NG_MIGRATION_INTERLEAVE__?.(phase, detail);
   } catch {
     // Test hooks must not break fail-closed migration.
   }
+  return undefined;
 }
 
 /**
@@ -440,8 +441,24 @@ function parseOrphanEnvelope(stored) {
  * claiming namespace so another account cannot preview/restore it.
  */
 function writeItemVerified(key, value) {
+  try {
+    globalThis.__NG_STORAGE_WRITE_HOOK__?.({ key, value });
+  } catch (err) {
+    throw err;
+  }
   writeItem(key, value);
   return readItem(key) === value;
+}
+
+function writeUniqueOrphanEnvelope(suffix, envelope) {
+  for (let i = 0; i < 24; i += 1) {
+    const candidate = orphanedWorkingCopyKey(suffix, `${mintNonce()}-${i}`);
+    if (readItem(candidate) != null) continue;
+    migrationInterleave('after-orphan-overflow-absent-read', { suffix, candidate });
+    if (readItem(candidate) != null) continue;
+    if (writeItemVerified(candidate, envelope)) return true;
+  }
+  return false;
 }
 
 function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId) {
@@ -461,14 +478,33 @@ function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId)
   if (existingParsed.raw === incomingRaw && existingParsed.namespaceId === incomingNamespaceId) {
     return true;
   }
-  for (let i = 0; i < 24; i += 1) {
-    const candidate = orphanedWorkingCopyKey(suffix, `${mintNonce()}-${i}`);
-    if (readItem(candidate) != null) continue;
-    migrationInterleave('after-orphan-overflow-absent-read', { suffix, candidate });
-    if (readItem(candidate) != null) continue;
-    if (writeItemVerified(candidate, envelope)) return true;
+  return writeUniqueOrphanEnvelope(suffix, envelope);
+}
+
+async function commitImportedOrphan(orphan, envelope, namespaceId) {
+  const preferred = orphan.preferredKey;
+  const existing = readItem(preferred);
+  await Promise.resolve(migrationInterleave('after-orphan-absent-read', {
+    suffix: orphan.suffix,
+    primary: preferred,
+    absent: existing == null,
+  }));
+  const existingNow = readItem(preferred);
+  if (existingNow != null) {
+    const existingParsed = parseOrphanEnvelope(existingNow);
+    if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) {
+      return;
+    }
+    if (!writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId)) {
+      throw new Error('orphan-write-failed');
+    }
+    return;
   }
-  return false;
+  // Two tabs can both observe the preferred key absent. localStorage cannot
+  // CAS, so never share that slot: mint a unique key inside this transaction.
+  if (!writeUniqueOrphanEnvelope(orphan.suffix, envelope)) {
+    throw new Error('orphan-write-failed');
+  }
 }
 
 function quarantineLegacyValue(suffix, value, namespaceId = null) {
@@ -641,17 +677,17 @@ export async function withLegacyMigrationWebLock(fn) {
 
 async function withMutationWebLock(fn) {
   if (mutationLockDepth > 0 || exclusiveMigrationDepth > 0) {
-    return fn();
+    return await Promise.resolve(fn());
   }
   if (!webMigrationLocksAvailable()) {
     const error = new Error('mutation-lock-unavailable');
     error.code = 'mutation-lock-unavailable';
     throw error;
   }
-  const result = await withLegacyMigrationWebLock(() => {
+  const result = await withLegacyMigrationWebLock(async () => {
     mutationLockDepth += 1;
     try {
-      return fn();
+      return await Promise.resolve(fn());
     } finally {
       mutationLockDepth -= 1;
     }
@@ -1273,7 +1309,7 @@ export const StorageService = {
     }
 
     try {
-      return await withMutationWebLock(() => {
+      return await withMutationWebLock(async () => {
         const snapshot = snapshotAllStorage();
         try {
           const namespaceId = this.getNamespaceId();
@@ -1296,34 +1332,7 @@ export const StorageService = {
               namespaceId,
               orphan.recoveredFrom,
             );
-            const existing = readItem(orphan.preferredKey);
-            if (existing == null) {
-              migrationInterleave('after-orphan-absent-read', {
-                suffix: orphan.suffix,
-                primary: orphan.preferredKey,
-                absent: true,
-              });
-              const existingNow = readItem(orphan.preferredKey);
-              if (existingNow == null) {
-                if (!writeItemVerified(orphan.preferredKey, envelope)) {
-                  throw new Error('orphan-write-failed');
-                }
-                continue;
-              }
-              const existingParsed = parseOrphanEnvelope(existingNow);
-              if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) {
-                continue;
-              }
-              if (!writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId)) {
-                throw new Error('orphan-write-failed');
-              }
-              continue;
-            }
-            const existingParsed = parseOrphanEnvelope(existing);
-            if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) continue;
-            if (!writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId)) {
-              throw new Error('orphan-write-failed');
-            }
+            await commitImportedOrphan(orphan, envelope, namespaceId);
           }
           return true;
         } catch (e) {
@@ -1332,7 +1341,9 @@ export const StorageService = {
         }
       });
     } catch (e) {
-      console.error('Failed to import JSON', e);
+      if (e?.code !== 'mutation-lock-unavailable' && e?.code !== 'mutation-lock-rejected') {
+        console.error('Failed to import JSON', e);
+      }
       return false;
     }
   }

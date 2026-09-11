@@ -86,6 +86,22 @@ function storageError(name = 'QuotaExceededError') {
   return err;
 }
 
+function snapshotStorage(storage = localStorage) {
+  const snap = {};
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    snap[key] = storage.getItem(key);
+  }
+  return snap;
+}
+
+function restoreStorage(snap, storage = localStorage) {
+  storage.clear();
+  for (const [key, value] of Object.entries(snap)) {
+    storage.setItem(key, value);
+  }
+}
+
 function parseOrphanStored(stored) {
   const parsed = JSON.parse(stored);
   if (parsed && parsed.v === ORPHAN_ENVELOPE_VERSION && typeof parsed.raw === 'string') {
@@ -243,6 +259,7 @@ describe('namespaced browser storage', () => {
 
   afterEach(() => {
     globalThis.__NG_MIGRATION_INTERLEAVE__ = undefined;
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = undefined;
     globalThis.fetch = originalFetch;
     globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null, { migrate: false });
@@ -1056,8 +1073,9 @@ describe('namespaced browser storage', () => {
 
     localStorage.removeItem(key);
     expect(await StorageService.importDataJSON(JSON.stringify(exported))).toBe(true);
-    const stored = JSON.parse(localStorage.getItem(key));
-    expect(stored.raw).toBe(raw);
+    const restored = StorageService.listOrphanedWorkingCopies().find((item) => item.raw === raw);
+    expect(restored?.raw).toBe(raw);
+    expect(restored?.key?.startsWith('neighborhood_guru:orphaned:')).toBe(true);
   });
 
   test('unscoped historical orphans are device-level and do not bind to Bob', () => {
@@ -1393,16 +1411,19 @@ describe('namespaced browser storage', () => {
     expect(bobRecords).not.toContain('Alice recovery');
   });
 
-  test('orphan allocation re-read after absence keeps both records', async () => {
+  test('orphan imports paused after the same absence check keep both records', async () => {
     const alice = createStorageService();
     const bob = createStorageService();
     alice.setOwner(SESSION_A.user.id, { migrate: false });
     bob.setOwner(SESSION_B.user.id, { migrate: false });
+    const waiters = [];
+    let bobPromise = null;
     let bobStarted = false;
     globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
-      if (phase === 'after-orphan-absent-read' && detail.absent && !bobStarted) {
+      if (phase !== 'after-orphan-absent-read' || !detail.absent) return undefined;
+      if (!bobStarted) {
         bobStarted = true;
-        bob.importDataJSON(JSON.stringify({
+        bobPromise = bob.importDataJSON(JSON.stringify({
           version: 1,
           orphanedWorkingCopies: [{
             suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
@@ -1410,6 +1431,12 @@ describe('namespaced browser storage', () => {
           }],
         }));
       }
+      return new Promise((resolve) => {
+        waiters.push(resolve);
+        if (waiters.length >= 2) {
+          waiters.splice(0).forEach((release) => release());
+        }
+      });
     };
     const aliceOk = await alice.importDataJSON(JSON.stringify({
       version: 1,
@@ -1418,24 +1445,57 @@ describe('namespaced browser storage', () => {
         raw: JSON.stringify({ name: 'Alice recovery', lat: 1, lng: 1 }),
       }],
     }));
-    expect(aliceOk).toBe(true);
+    expect(bobPromise).toBeInstanceOf(Promise);
+    const bobOk = await bobPromise;
+    expect({ aliceOk, bobOk }).toEqual({ aliceOk: true, bobOk: true });
     alice.setOwner(SESSION_A.user.id, { migrate: false });
     bob.setOwner(SESSION_B.user.id, { migrate: false });
-    const names = [
+    const records = [
       ...alice.listOrphanedWorkingCopies(),
       ...bob.listOrphanedWorkingCopies(),
-    ].map((item) => item.preview?.homeName);
+    ];
+    const names = records.map((item) => item.preview?.homeName);
+    const keys = [...new Set(records.map((item) => item.key))];
     expect(names).toEqual(expect.arrayContaining(['Alice recovery', 'Bob recovery']));
+    expect(keys.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('import fails closed without writing when Web Locks are unavailable', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const before = snapshotStorage();
+    globalThis.navigator = { ...(globalThis.navigator || {}), locks: undefined };
+    expect(await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'After place' })],
+    }))).toBe(false);
+    expect(snapshotStorage()).toEqual(before);
+  });
+
+  test('import fails closed without writing when Web Lock is rejected', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const before = snapshotStorage();
+    globalThis.navigator = {
+      ...(globalThis.navigator || {}),
+      locks: {
+        request() {
+          return Promise.reject(new Error('lock denied'));
+        },
+      },
+    };
+    expect(await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+    }))).toBe(false);
+    expect(snapshotStorage()).toEqual(before);
   });
 
   test('failed import restores byte-identical storage', async () => {
     StorageService.setOwner(SESSION_B.user.id, { migrate: false });
     StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
-    const before = {};
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      before[key] = localStorage.getItem(key);
-    }
+    const before = snapshotStorage();
     const inner = globalThis.localStorage;
     globalThis.localStorage = wrapLocalStorage(inner, {
       setItem(key, value, store) {
@@ -1448,12 +1508,43 @@ describe('namespaced browser storage', () => {
       homeAddress: { name: 'After', lat: 2, lng: 2 },
       savedPlaces: [userPlace({ name: 'After place' })],
     }))).toBe(false);
-    const after = {};
-    for (let i = 0; i < inner.length; i += 1) {
-      const key = inner.key(i);
-      after[key] = inner.getItem(key);
+    globalThis.localStorage = inner;
+    expect(snapshotStorage(inner)).toEqual(before);
+  });
+
+  test('failed import restores byte-identical storage at every write boundary', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const before = snapshotStorage();
+    const doc = JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'After place' })],
+      orphanedWorkingCopies: [{
+        suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
+        raw: JSON.stringify({ name: 'Orphan after', lat: 3, lng: 3 }),
+      }],
+    });
+    let writes = 0;
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = () => { writes += 1; };
+    expect(await StorageService.importDataJSON(doc)).toBe(true);
+    const writeCount = writes;
+    expect(writeCount).toBeGreaterThan(1);
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = undefined;
+    restoreStorage(before);
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+
+    for (let failAt = 1; failAt <= writeCount; failAt += 1) {
+      restoreStorage(before);
+      StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+      let n = 0;
+      globalThis.__NG_STORAGE_WRITE_HOOK__ = () => {
+        n += 1;
+        if (n === failAt) throw new Error(`import-write-failed:${failAt}`);
+      };
+      expect(await StorageService.importDataJSON(doc)).toBe(false);
+      expect(snapshotStorage()).toEqual(before);
     }
-    expect(after).toEqual(before);
   });
 });
 
@@ -1468,6 +1559,7 @@ describe('working-copy bind and login I/O', () => {
 
   afterEach(() => {
     globalThis.__NG_MIGRATION_INTERLEAVE__ = undefined;
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = undefined;
     globalThis.fetch = originalFetch;
     globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null, { migrate: false });

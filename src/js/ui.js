@@ -65,7 +65,11 @@ export class UIController {
     this._placesById.clear();
     this._discoveredPois = [];
     this._jambaseMatches = [];
-    this.resetOwnerScopedPresentation?.();
+    try {
+      this.resetOwnerScopedPresentation?.();
+    } catch {
+      // Nodes may already be gone.
+    }
     try {
       if (this.elements.savedPlacesList) this.elements.savedPlacesList.innerHTML = '';
       if (this.elements.poiResultsContainer) this.elements.poiResultsContainer.innerHTML = '';
@@ -353,6 +357,7 @@ export class UIController {
   }
 
   updateWeatherDisplay(weatherData) {
+    if (this.disposed) return;
     if (!this.elements.weatherHeaderPill) return;
     if (!weatherData) {
       this.elements.weatherHeaderPill.classList.add('hidden');
@@ -385,6 +390,7 @@ export class UIController {
    * OpenStreetMap POI Discovery Modal Controls
    */
   openPoiModal() {
+    if (this.disposed) return;
     if (this.elements.poiDiscoveryModal) {
       this.elements.poiDiscoveryModal.classList.remove('hidden');
     }
@@ -451,6 +457,7 @@ export class UIController {
    * JamBase Venue Match Selector Modal Controls
    */
   openJambasePickerModal() {
+    if (this.disposed) return;
     if (this.elements.jambasePickerModal) {
       this.elements.jambasePickerModal.classList.remove('hidden');
     }
@@ -518,6 +525,7 @@ export class UIController {
   }
 
   renderPeopleFields(people = []) {
+    if (this.disposed) return;
     const container = this.elements.peopleListContainer;
     if (!container) return;
     container.innerHTML = '';
@@ -567,6 +575,7 @@ export class UIController {
   }
 
   renderContactFields(contacts = []) {
+    if (this.disposed) return;
     const container = this.elements.contactMethodsContainer;
     if (!container) return;
     container.innerHTML = '';
@@ -629,6 +638,7 @@ export class UIController {
   }
 
   renderEventFields(events = []) {
+    if (this.disposed) return;
     const container = this.elements.eventsListContainer;
     if (!container) return;
     container.innerHTML = '';
@@ -782,6 +792,7 @@ export class UIController {
    * Sidebar Drawer Controls
    */
   toggleSidebar(open = null) {
+    if (this.disposed) return;
     if (open === true) {
       this.elements.placesSidebar.classList.add('open');
     } else if (open === false) {
@@ -974,6 +985,7 @@ export class UIController {
    * Settings Modal Controls
    */
   openSettingsModal(mapboxToken, jambaseToken) {
+    if (this.disposed) return;
     if (this.elements.settingsMapboxToken) {
       this.elements.settingsMapboxToken.value = mapboxToken || '';
     }
@@ -984,6 +996,7 @@ export class UIController {
   }
 
   closeSettingsModal() {
+    if (this.disposed) return;
     this.elements.settingsModal.classList.add('hidden');
   }
 
@@ -991,6 +1004,7 @@ export class UIController {
    * Dedicated Key Prompt Modal & Key Warning State
    */
   openKeyPromptModal(token = '') {
+    if (this.disposed) return;
     if (this.elements.promptMapboxToken) {
       this.elements.promptMapboxToken.value = token || '';
     }
@@ -1000,12 +1014,14 @@ export class UIController {
   }
 
   closeKeyPromptModal() {
+    if (this.disposed) return;
     if (this.elements.keyPromptModal) {
       this.elements.keyPromptModal.classList.add('hidden');
     }
   }
 
   updateKeyWarningState(hasKey = true) {
+    if (this.disposed) return;
     if (hasKey) {
       if (this.elements.keyWarningBanner) this.elements.keyWarningBanner.classList.add('hidden');
       if (this.elements.keyWarningDot) this.elements.keyWarningDot.classList.add('hidden');
