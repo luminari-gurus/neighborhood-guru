@@ -32,6 +32,12 @@ export const LEGACY_MIGRATION_CLAIM_PREFIX = 'neighborhood_guru:legacy-claim:';
 /** Web Lock name for serializing one-time legacy bootstrap across tabs. */
 export const LEGACY_MIGRATION_LOCK_NAME = 'neighborhood-guru:legacy-migration';
 
+/** Legacy device-global import journal (read for recovery; new writes are namespaced). */
+export const IMPORT_JOURNAL_KEY = 'neighborhood_guru:import-journal';
+
+/** Per-namespace import journals: `neighborhood_guru:import-journal:${encodeURIComponent(namespaceId)}`. */
+export const IMPORT_JOURNAL_PREFIX = 'neighborhood_guru:import-journal:';
+
 export function orphanedWorkingCopyKey(suffix, token = '') {
   return token
     ? `${ORPHANED_WORKING_COPY_PREFIX}${suffix}:${token}`
@@ -450,18 +456,19 @@ function writeItemVerified(key, value) {
   return readItem(key) === value;
 }
 
-function writeUniqueOrphanEnvelope(suffix, envelope) {
+function writeUniqueOrphanEnvelope(suffix, envelope, beforeWrite) {
   for (let i = 0; i < 24; i += 1) {
     const candidate = orphanedWorkingCopyKey(suffix, `${mintNonce()}-${i}`);
     if (readItem(candidate) != null) continue;
     migrationInterleave('after-orphan-overflow-absent-read', { suffix, candidate });
     if (readItem(candidate) != null) continue;
+    beforeWrite?.(candidate, envelope);
     if (writeItemVerified(candidate, envelope)) return candidate;
   }
   return null;
 }
 
-function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId) {
+function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId, beforeWrite) {
   const primary = orphanedWorkingCopyKey(suffix);
   const existing = readItem(primary);
   migrationInterleave('after-orphan-absent-read', {
@@ -471,6 +478,7 @@ function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId)
   });
   const existingNow = readItem(primary);
   if (existingNow == null) {
+    beforeWrite?.(primary, envelope);
     if (!writeItemVerified(primary, envelope)) return null;
     return primary;
   }
@@ -478,10 +486,10 @@ function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId)
   if (existingParsed.raw === incomingRaw && existingParsed.namespaceId === incomingNamespaceId) {
     return primary;
   }
-  return writeUniqueOrphanEnvelope(suffix, envelope);
+  return writeUniqueOrphanEnvelope(suffix, envelope, beforeWrite);
 }
 
-async function commitImportedOrphan(orphan, envelope, namespaceId) {
+async function commitImportedOrphan(orphan, envelope, namespaceId, beforeWrite) {
   const preferred = orphan.preferredKey;
   const existing = readItem(preferred);
   await Promise.resolve(migrationInterleave('after-orphan-absent-read', {
@@ -495,13 +503,13 @@ async function commitImportedOrphan(orphan, envelope, namespaceId) {
     if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) {
       return preferred;
     }
-    const written = writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId);
+    const written = writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId, beforeWrite);
     if (!written) throw new Error('orphan-write-failed');
     return written;
   }
   // Two tabs can both observe the preferred key absent. localStorage cannot
   // CAS, so never share that slot: mint a unique key inside this transaction.
-  const written = writeUniqueOrphanEnvelope(orphan.suffix, envelope);
+  const written = writeUniqueOrphanEnvelope(orphan.suffix, envelope, beforeWrite);
   if (!written) throw new Error('orphan-write-failed');
   return written;
 }
@@ -739,8 +747,6 @@ export async function withLegacyMigrationWebLock(fn) {
   return { lockUnavailable: true };
 }
 
-const IMPORT_JOURNAL_KEY = 'neighborhood_guru:import-journal';
-
 function mutationLockError(code) {
   const error = new Error(code);
   error.code = code;
@@ -838,44 +844,116 @@ function storageMatchesSnapshot(snap, attempted = new Map()) {
   return true;
 }
 
-function readImportJournal() {
-  return parseJsonOr(readItem(IMPORT_JOURNAL_KEY), null);
+function importJournalKeyFor(namespaceId) {
+  return `${IMPORT_JOURNAL_PREFIX}${encodeURIComponent(String(namespaceId || ''))}`;
 }
 
-function writeImportJournal(entry) {
-  try {
-    writeItem(IMPORT_JOURNAL_KEY, JSON.stringify(entry));
-  } catch {
-    // Best-effort durable failure marker.
+function isImportJournalStorageKey(key) {
+  return key === IMPORT_JOURNAL_KEY
+    || (typeof key === 'string' && key.startsWith(IMPORT_JOURNAL_PREFIX));
+}
+
+function listImportJournalStorageKeys() {
+  const keys = [];
+  for (const key of listStorageKeys()) {
+    if (isImportJournalStorageKey(key)) keys.push(key);
   }
+  return keys;
 }
 
-function clearImportJournal() {
+function readImportJournalAt(key) {
+  return parseJsonOr(readItem(key), null);
+}
+
+function persistImportJournalVerified(entry) {
+  const key = importJournalKeyFor(entry.namespaceId);
+  const raw = JSON.stringify(entry);
+  return writeItemVerified(key, raw);
+}
+
+function clearImportJournalAt(key) {
   try {
-    removeItem(IMPORT_JOURNAL_KEY);
+    removeItem(key);
   } catch {
     // Ignore.
   }
 }
 
-function recoverImportJournal() {
-  const journal = readImportJournal();
-  if (!journal || journal.status !== 'rollback-incomplete') {
-    if (journal && journal.status !== 'rollback-incomplete') clearImportJournal();
-    return { ok: true, recovered: false };
+function clearImportJournalFor(namespaceId) {
+  clearImportJournalAt(importJournalKeyFor(namespaceId));
+  const globalJournal = readImportJournalAt(IMPORT_JOURNAL_KEY);
+  if (globalJournal && globalJournal.namespaceId === namespaceId) {
+    clearImportJournalAt(IMPORT_JOURNAL_KEY);
   }
-  const snapshot = journal.snapshot && typeof journal.snapshot === 'object' ? journal.snapshot : null;
-  const written = journal.written && typeof journal.written === 'object' ? journal.written : null;
-  if (!snapshot || !written) {
+}
+
+function journalIntendedMap(journal) {
+  const intended = journal?.intended && typeof journal.intended === 'object' && !Array.isArray(journal.intended)
+    ? journal.intended
+    : null;
+  if (intended) return intended;
+  const written = journal?.written && typeof journal.written === 'object' && !Array.isArray(journal.written)
+    ? journal.written
+    : null;
+  return written;
+}
+
+function recoverImportJournalAt(key) {
+  const stored = readItem(key);
+  if (stored == null) return { ok: true, recovered: false };
+  const journal = parseJsonOr(stored, null);
+  if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
     return { ok: false, reason: 'rollback-incomplete' };
   }
-  const attempted = new Map(Object.entries(written));
+  if (journal.status !== 'pending' && journal.status !== 'rollback-incomplete') {
+    return { ok: false, reason: 'rollback-incomplete' };
+  }
+  const snapshot = journal.snapshot && typeof journal.snapshot === 'object' && !Array.isArray(journal.snapshot)
+    ? journal.snapshot
+    : null;
+  const intended = journalIntendedMap(journal);
+  if (!snapshot || !intended) {
+    return { ok: false, reason: 'rollback-incomplete' };
+  }
+  const attempted = new Map(Object.entries(intended));
   const rolled = restoreWrittenKeysIfUnchanged(snapshot, attempted);
   if (rolled && storageMatchesSnapshot(snapshot, attempted)) {
-    clearImportJournal();
+    clearImportJournalAt(key);
     return { ok: true, recovered: true };
   }
+  if (journal.status !== 'rollback-incomplete') {
+    try {
+      writeItem(key, JSON.stringify({ ...journal, status: 'rollback-incomplete' }));
+    } catch {
+      // Keep the pending snapshot even if the status bump fails.
+    }
+  }
   return { ok: false, reason: 'rollback-incomplete' };
+}
+
+function recoverAllImportJournals() {
+  let allOk = true;
+  let recovered = false;
+  for (const key of listImportJournalStorageKeys()) {
+    const result = recoverImportJournalAt(key);
+    if (!result.ok) allOk = false;
+    if (result.recovered) recovered = true;
+  }
+  return allOk ? { ok: true, recovered } : { ok: false, reason: 'rollback-incomplete' };
+}
+
+function hasUnresolvedImportJournal() {
+  return listImportJournalStorageKeys().some((key) => {
+    const journal = readImportJournalAt(key);
+    return Boolean(journal && (journal.status === 'pending' || journal.status === 'rollback-incomplete'));
+  });
+}
+
+function listImportJournalsForExport() {
+  return listImportJournalStorageKeys().map((key) => ({
+    key,
+    journal: readImportJournalAt(key),
+  })).filter((entry) => entry.journal);
 }
 
 function importOutcome(ok, reason) {
@@ -1102,7 +1180,8 @@ export const StorageService = {
         runOwnerMismatchFailClosed();
         return importOutcome(false, 'owner-changed');
       }
-      recoverImportJournal();
+      const recovered = recoverAllImportJournals();
+      if (!recovered.ok) return importOutcome(false, 'rollback-incomplete');
       runExclusiveLegacyMigration(anonymous, ownerId);
       return { ok: true };
     });
@@ -1118,7 +1197,6 @@ export const StorageService = {
   legacyMigrationStatus() {
     const leftovers = this.listPendingLegacyWorkingCopies();
     const ambiguousLeftovers = listAmbiguousLegacyWorkingCopies();
-    const journal = readImportJournal();
     return {
       leftoverPresent: leftoverExists(),
       leftoverUnapplied: leftoverUnappliedForOwner(this._anonymous, this._ownerId),
@@ -1128,7 +1206,7 @@ export const StorageService = {
       ambiguousLeftovers,
       ownerOrphans: this.listOrphanedWorkingCopies(),
       deviceOrphans: this.listDeviceOrphanedWorkingCopies(),
-      importRollbackIncomplete: Boolean(journal && journal.status === 'rollback-incomplete'),
+      importRollbackIncomplete: hasUnresolvedImportJournal(),
     };
   },
 
@@ -1444,14 +1522,17 @@ export const StorageService = {
       pendingLegacyWorkingCopies: this.listPendingLegacyWorkingCopies(),
       ambiguousLegacyWorkingCopies: listAmbiguousLegacyWorkingCopies(),
       deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
+      importJournals: listImportJournalsForExport(),
     }, null, 2);
   },
 
   /**
    * Import neighborhood JSON into the namespace that initiated the call.
    * Owner/namespace are snapshotted before the Web Lock; a later owner flip
-   * aborts without writing. Rollback restores a key only if it still holds
-   * this import's write.
+   * aborts without writing. A verified per-namespace journal is persisted
+   * before the first dest write. Rollback restores a key only if it still
+   * holds this import's write. Unresolved journals block later imports and
+   * are never cleared for another namespace.
    */
   async importDataJSON(jsonStr) {
     let data;
@@ -1520,7 +1601,8 @@ export const StorageService = {
         ) {
           return importOutcome(false, 'owner-changed');
         }
-        recoverImportJournal();
+        const recovered = recoverAllImportJournals();
+        if (!recovered.ok) return importOutcome(false, 'rollback-incomplete');
         migrationInterleave('after-import-lock', { namespaceId: ownerSnapshot.namespaceId });
 
         const { anonymous, ownerId, namespaceId } = ownerSnapshot;
@@ -1532,21 +1614,47 @@ export const StorageService = {
         for (const orphan of preparedOrphans) mutatingKeys.push(orphan.preferredKey);
 
         const snapshot = snapshotStorageSubset(mutatingKeys);
-        const attempted = new Map();
+        const intended = {};
+        if (data.homeAddress) intended[homeKey] = JSON.stringify(data.homeAddress);
+        if (savedPlaces) intended[placesKey] = JSON.stringify(savedPlaces);
+        const journal = {
+          v: 1,
+          status: 'pending',
+          namespaceId,
+          at: Date.now(),
+          snapshot,
+          intended,
+        };
+        if (!persistImportJournalVerified(journal)) {
+          return importOutcome(false, 'write-failed');
+        }
+
+        const attempted = new Map(Object.entries(intended));
+        const recordDestWrite = (key, value) => {
+          if (!Object.prototype.hasOwnProperty.call(journal.snapshot, key)) {
+            journal.snapshot[key] = readItem(key);
+          }
+          journal.intended[key] = value;
+          attempted.set(key, value);
+          if (!persistImportJournalVerified(journal)) {
+            throw new Error('journal-write-failed');
+          }
+        };
+
         try {
           if (data.homeAddress) {
-            const raw = JSON.stringify(data.homeAddress);
-            attempted.set(homeKey, raw);
+            const raw = intended[homeKey];
             if (!writeItemVerified(homeKey, raw)) {
               throw new Error('home-write-failed');
             }
+            migrationInterleave('after-import-write', { key: homeKey, namespaceId });
           }
           if (savedPlaces) {
-            const raw = JSON.stringify(savedPlaces);
-            attempted.set(placesKey, raw);
+            const raw = intended[placesKey];
             if (!writeItemVerified(placesKey, raw)) {
               throw new Error('places-write-failed');
             }
+            migrationInterleave('after-import-write', { key: placesKey, namespaceId });
           }
           for (const orphan of preparedOrphans) {
             const envelope = wrapOrphanEnvelope(
@@ -1555,28 +1663,29 @@ export const StorageService = {
               namespaceId,
               orphan.recoveredFrom,
             );
-            const written = await commitImportedOrphan(orphan, envelope, namespaceId);
-            if (written) attempted.set(written, envelope);
+            const written = await commitImportedOrphan(orphan, envelope, namespaceId, recordDestWrite);
+            void written;
           }
-          clearImportJournal();
+          for (const [key, value] of Object.entries(journal.intended)) {
+            if (readItem(key) !== value) throw new Error('commit-verify-failed');
+          }
+          clearImportJournalFor(namespaceId);
           return { ok: true };
         } catch (e) {
-          const rolled = restoreWrittenKeysIfUnchanged(snapshot, attempted);
-          if (!rolled || !storageMatchesSnapshot(snapshot, attempted)) {
-            writeImportJournal({
-              v: 1,
-              status: 'rollback-incomplete',
-              namespaceId,
-              at: Date.now(),
-              snapshot,
-              written: Object.fromEntries(attempted),
-            });
-            console.error('Failed to roll back neighborhood import');
-            return importOutcome(false, 'rollback-incomplete');
+          const rolled = restoreWrittenKeysIfUnchanged(journal.snapshot, attempted);
+          if (rolled && storageMatchesSnapshot(journal.snapshot, attempted)) {
+            clearImportJournalFor(namespaceId);
+            return importOutcome(false, 'write-failed');
           }
-          return importOutcome(false, e?.message === 'home-write-failed' || e?.message === 'places-write-failed' || e?.message === 'orphan-write-failed'
-            ? 'write-failed'
-            : 'write-failed');
+          journal.status = 'rollback-incomplete';
+          journal.intended = Object.fromEntries(attempted);
+          try {
+            persistImportJournalVerified(journal);
+          } catch {
+            // The pending journal still holds the pre-write snapshot.
+          }
+          console.error('Failed to roll back neighborhood import');
+          return importOutcome(false, 'rollback-incomplete');
         }
       });
     } catch (e) {

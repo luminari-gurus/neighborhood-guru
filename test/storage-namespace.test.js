@@ -24,6 +24,8 @@ import {
   workingCopyKey,
   ORPHAN_ENVELOPE_VERSION,
   LEGACY_MIGRATION_LOCK_NAME,
+  IMPORT_JOURNAL_KEY,
+  IMPORT_JOURNAL_PREFIX,
   createStorageService,
 } from '../src/js/storage.js';
 
@@ -100,6 +102,12 @@ function restoreStorage(snap, storage = localStorage) {
   for (const [key, value] of Object.entries(snap)) {
     storage.setItem(key, value);
   }
+}
+
+function importJournalEntries(storage = localStorage) {
+  return Object.entries(snapshotStorage(storage)).filter(([key]) => (
+    key === IMPORT_JOURNAL_KEY || key.startsWith(IMPORT_JOURNAL_PREFIX)
+  ));
 }
 
 function parseOrphanStored(stored) {
@@ -1756,6 +1764,123 @@ describe('namespaced browser storage', () => {
       authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
     )).name).toBe('Before');
     expect(StorageService.legacyMigrationStatus().importRollbackIncomplete).toBe(false);
+  });
+
+  test('crash after first import write leaves a recoverable journal', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Alice original home', lat: 1, lng: 1 });
+    StorageService.savePlace({ name: 'Alice original place', lat: 2, lng: 2 });
+    const homeKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const placesKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.SAVED_PLACES);
+    let crashSnap = null;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
+      if (phase === 'after-import-write' && String(detail?.key || '').includes('home_address')) {
+        crashSnap = snapshotStorage();
+      }
+    };
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = ({ key }) => {
+      if (String(key).includes('saved_places')) throw new Error('simulated-crash');
+    };
+    await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Alice imported home', lat: 3, lng: 3 },
+      savedPlaces: [userPlace({ name: 'Alice imported place' })],
+    }));
+    expect(crashSnap).not.toBeNull();
+    restoreStorage(crashSnap);
+    expect(JSON.parse(localStorage.getItem(homeKey)).name).toBe('Alice imported home');
+    expect(JSON.parse(localStorage.getItem(placesKey)).some((place) => place.name === 'Alice original place')).toBe(true);
+    expect(importJournalEntries().length).toBeGreaterThan(0);
+    expect(StorageService.legacyMigrationStatus().importRollbackIncomplete).toBe(true);
+
+    await StorageService.ensureLegacyMigratedAsync();
+    expect(JSON.parse(localStorage.getItem(homeKey)).name).toBe('Alice original home');
+    expect(JSON.parse(localStorage.getItem(placesKey)).some((place) => place.name === 'Alice original place')).toBe(true);
+    expect(importJournalEntries()).toEqual([]);
+    expect(StorageService.legacyMigrationStatus().importRollbackIncomplete).toBe(false);
+  });
+
+  test('unresolved foreign journal blocks later imports and is not cleared', async () => {
+    const alice = createStorageService();
+    const bob = createStorageService();
+    alice.setOwner(SESSION_A.user.id, { migrate: false });
+    alice.setHomeAddress({ name: 'Alice original', lat: 1, lng: 1 });
+    const aliceHomeKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const bobHomeKey = authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const inner = globalThis.localStorage;
+    let aliceHomeWrites = 0;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        if (String(key).includes('saved_places')) throw storageError();
+        if (String(key) === aliceHomeKey) {
+          aliceHomeWrites += 1;
+          if (aliceHomeWrites > 1) throw storageError();
+        }
+        store.setItem(key, value);
+      },
+    });
+    const failed = await alice.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Alice imported', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'Alice imported place' })],
+    }));
+    expect(failed).toMatchObject({ ok: false, reason: 'rollback-incomplete' });
+    expect(JSON.parse(inner.getItem(aliceHomeKey)).name).toBe('Alice imported');
+    expect(importJournalEntries(inner).length).toBeGreaterThan(0);
+
+    bob.setOwner(SESSION_B.user.id, { migrate: false });
+    bob.setHomeAddress({ name: 'Bob home', lat: 4, lng: 4 });
+    const bobImport = await bob.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Bob backup', lat: 5, lng: 5 },
+    }));
+    expect(bobImport).toMatchObject({ ok: false, reason: 'rollback-incomplete' });
+    expect(JSON.parse(inner.getItem(bobHomeKey)).name).toBe('Bob home');
+    expect(importJournalEntries(inner).length).toBeGreaterThan(0);
+    expect(JSON.parse(inner.getItem(aliceHomeKey)).name).toBe('Alice imported');
+
+    globalThis.localStorage = inner;
+    const recovered = await alice.ensureLegacyMigratedAsync();
+    expect(recovered).toMatchObject({ ok: true });
+    expect(JSON.parse(inner.getItem(aliceHomeKey)).name).toBe('Alice original');
+    expect(JSON.parse(inner.getItem(bobHomeKey)).name).toBe('Bob home');
+    expect(importJournalEntries(inner)).toEqual([]);
+  });
+
+  test('recoverable foreign journal is restored then a later import can proceed', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Alice original home', lat: 1, lng: 1 });
+    StorageService.savePlace({ name: 'Alice original place', lat: 2, lng: 2 });
+    const aliceHomeKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    let crashSnap = null;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
+      if (phase === 'after-import-write' && String(detail?.key || '').includes('home_address')) {
+        crashSnap = snapshotStorage();
+      }
+    };
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = ({ key }) => {
+      if (String(key).includes('saved_places')) throw new Error('simulated-crash');
+    };
+    await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Alice imported home', lat: 3, lng: 3 },
+      savedPlaces: [userPlace({ name: 'Alice imported place' })],
+    }));
+    restoreStorage(crashSnap);
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = undefined;
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = undefined;
+
+    const bob = createStorageService();
+    bob.setOwner(SESSION_B.user.id, { migrate: false });
+    bob.setHomeAddress({ name: 'Bob home', lat: 4, lng: 4 });
+    const bobImport = await bob.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Bob backup', lat: 5, lng: 5 },
+    }));
+    expect(bobImport).toMatchObject({ ok: true });
+    expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('Alice original home');
+    expect(bob.getHomeAddress().name).toBe('Bob backup');
+    expect(importJournalEntries()).toEqual([]);
   });
 
   test('second import on the same service waits for the Web Lock', async () => {
