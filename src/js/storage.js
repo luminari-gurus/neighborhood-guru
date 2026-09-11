@@ -1042,16 +1042,22 @@ export const StorageService = {
    * to flip the owner without touching storage so callers can clear UI first.
    */
   setOwner(ownerId, { migrate = true } = {}) {
+    let nextAnonymous;
+    let nextOwnerId;
     if (ownerId == null || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
-      this._anonymous = true;
-      this._ownerId = ANONYMOUS_OWNER_ID;
+      nextAnonymous = true;
+      nextOwnerId = ANONYMOUS_OWNER_ID;
     } else if (typeof ownerId !== 'string') {
       throw new TypeError('Owner id must be a string or null');
     } else {
-      this._anonymous = false;
-      this._ownerId = ownerId;
+      nextAnonymous = false;
+      nextOwnerId = ownerId;
     }
-    this._ownerGeneration = (this._ownerGeneration || 0) + 1;
+    if (nextAnonymous !== this._anonymous || nextOwnerId !== this._ownerId) {
+      this._ownerGeneration = (this._ownerGeneration || 0) + 1;
+    }
+    this._anonymous = nextAnonymous;
+    this._ownerId = nextOwnerId;
     if (migrate) {
       runFailClosedLegacyMigration(this._anonymous, this._ownerId);
     }

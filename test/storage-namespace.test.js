@@ -1664,6 +1664,21 @@ describe('namespaced browser storage', () => {
     expect(StorageService.getHomeAddress().name).toBe('Alice current');
   });
 
+  test('same-owner setOwner during a queued import does not abort the write', async () => {
+    const gated = installGatedWebLocks();
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Alice current', lat: 1, lng: 1 });
+    const pending = StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Alice backup', lat: 2, lng: 2 },
+    }));
+    const grant = await gated.waitForGrant();
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    grant();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(StorageService.getHomeAddress().name).toBe('Alice backup');
+  });
+
   test('rollback does not clobber a concurrent write to the same key', async () => {
     StorageService.setOwner(SESSION_B.user.id, { migrate: false });
     StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
@@ -1753,6 +1768,30 @@ describe('namespaced browser storage', () => {
     const device = JSON.parse(StorageService.exportDeviceRecoveryJSON());
     expect(device.ambiguousLegacyWorkingCopies.some((item) => item.preview?.homeName === 'Newer old-tab edit')).toBe(true);
     expect(StorageService.getHomeAddress()).toBeNull();
+  });
+
+  test('ensureLegacyMigratedAsync returns lock-rejected without adopting leftover', async () => {
+    localStorage.setItem(
+      LEGACY_WORKING_COPY_KEYS.home_address,
+      JSON.stringify({ name: 'pending leftover', lat: 3, lng: 3 }),
+    );
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    globalThis.navigator = {
+      ...(globalThis.navigator || {}),
+      locks: {
+        request() {
+          return Promise.reject(new Error('lock denied'));
+        },
+      },
+    };
+    const result = await StorageService.ensureLegacyMigratedAsync();
+    expect(result).toMatchObject({ ok: false, reason: 'lock-rejected' });
+    expect(StorageService.getHomeAddress()).toBeNull();
+    expect(StorageService.legacyMigrationStatus()).toMatchObject({
+      leftoverAdoptable: true,
+      leftoverUnapplied: true,
+      locksAvailable: true,
+    });
   });
 
   test('import mints unique ids when a backup contains duplicate place ids', async () => {
