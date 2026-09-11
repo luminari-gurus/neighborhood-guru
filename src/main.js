@@ -111,6 +111,7 @@ export class NeighborhoodGuruApp {
           onLoad: () => {
             if (this.disposed || this.mapboxService.tornDown) return;
             this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
+              if (this.disposed || this.mapboxService.tornDown) return;
               this.openLocationEditor(place);
             });
           },
@@ -244,6 +245,8 @@ export class NeighborhoodGuruApp {
   listen(target, type, handler) {
     if (this.disposed) return;
     if (!target || typeof target.addEventListener !== 'function') return;
+    // AbortSignal in addEventListener: Chrome/Edge 90+, Firefox 86+, Safari 15+.
+    // Always track and removeEventListener so older supported engines still tear down.
     const wrapped = (event) => {
       if (this.disposed) return;
       handler(event);

@@ -34,6 +34,7 @@
 - **POI Data**: OpenStreetMap [Overpass API](https://overpass-api.de)
 - **Weather**: [Open-Meteo API](https://open-meteo.com)
 - **Build Tool & Runtime**: [Vite](https://vitejs.dev) + [Bun](https://bun.sh)
+- **Supported browsers**: Current evergreen engines with ES modules — Chrome/Edge 90+, Firefox 90+, Safari 15+. Event teardown uses `AbortSignal` when available and always `removeEventListener` as a fallback.
 
 ---
 

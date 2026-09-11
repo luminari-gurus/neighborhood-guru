@@ -23,6 +23,8 @@ import {
   orphanedWorkingCopyKey,
   workingCopyKey,
   ORPHAN_ENVELOPE_VERSION,
+  LEGACY_MIGRATION_LOCK_NAME,
+  createStorageService,
 } from '../src/js/storage.js';
 
 const originalFetch = globalThis.fetch;
@@ -975,6 +977,59 @@ describe('namespaced browser storage', () => {
     );
     expect(exported.ok).toBe(true);
     expect(exported.raw).toContain('ambiguous leftover');
+  });
+
+  test('two modules cannot both adopt the shared legacy private home', () => {
+    const home = { name: 'shared legacy private home', lat: 1, lng: 1 };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(home));
+    const alice = createStorageService();
+    const bob = createStorageService();
+    let bobRan = false;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
+      if (phase === 'after-absent-claim-read'
+        && detail.namespaceId === `user:${SESSION_A.user.id}`
+        && !bobRan) {
+        bobRan = true;
+        bob.setOwner(SESSION_B.user.id);
+      }
+    };
+
+    alice.setOwner(SESSION_A.user.id);
+    const result = {
+      alice: alice.getHomeAddress()?.name ?? null,
+      bob: bob.getHomeAddress()?.name ?? null,
+      legacy: localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address),
+      claim: JSON.parse(localStorage.getItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS)) || 'null'),
+    };
+    expect(result.alice === 'shared legacy private home' && result.bob === 'shared legacy private home').toBe(false);
+    expect(result.alice === 'shared legacy private home' || result.bob === 'shared legacy private home').toBe(true);
+  });
+
+  test('ensureLegacyMigratedAsync uses Web Locks when navigator.locks is available', async () => {
+    const requests = [];
+    const previous = globalThis.navigator;
+    globalThis.navigator = {
+      ...(previous || {}),
+      locks: {
+        request(name, options, callback) {
+          requests.push({ name, options });
+          return callback();
+        },
+      },
+    };
+    try {
+      localStorage.setItem(
+        LEGACY_WORKING_COPY_KEYS.home_address,
+        JSON.stringify({ name: 'lock home', lat: 1, lng: 1 }),
+      );
+      await StorageService.ensureLegacyMigratedAsync();
+      expect(requests.some((entry) => (
+        entry.name === LEGACY_MIGRATION_LOCK_NAME && entry.options.mode === 'exclusive'
+      ))).toBe(true);
+      expect(StorageService.getHomeAddress()?.name).toBe('lock home');
+    } finally {
+      globalThis.navigator = previous;
+    }
   });
 });
 

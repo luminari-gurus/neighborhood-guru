@@ -29,6 +29,9 @@ export const ORPHANED_WORKING_COPY_PREFIX = 'neighborhood_guru:orphaned:';
 /** Durable claim tying an unprefixed leftover to the namespace that started migrating it. */
 export const LEGACY_MIGRATION_CLAIM_PREFIX = 'neighborhood_guru:legacy-claim:';
 
+/** Web Lock name for serializing one-time legacy bootstrap across tabs. */
+export const LEGACY_MIGRATION_LOCK_NAME = 'neighborhood-guru:legacy-migration';
+
 export function orphanedWorkingCopyKey(suffix, token = '') {
   return token
     ? `${ORPHANED_WORKING_COPY_PREFIX}${suffix}:${token}`
@@ -474,8 +477,9 @@ function withLegacyMigrationLock(fn) {
   try {
     const existing = parseJsonOr(readItem(lockKey), null);
     if (existing && typeof existing.token === 'string' && typeof existing.expires === 'number' && existing.expires > now) {
-      // Another tab holds the sync fallback lock. Still run: Web Locks are
-      // async-only, and nonce CAS is the actual exclusive claim.
+      // Another tab holds the sync fallback lock. Still run: nonce CAS is
+      // the exclusive claim. Prefer `ensureLegacyMigratedAsync` (Web Locks)
+      // when the caller can await.
     } else {
       writeItem(lockKey, JSON.stringify({ token, expires: now + 5000 }));
       const confirm = parseJsonOr(readItem(lockKey), null);
@@ -496,6 +500,14 @@ function withLegacyMigrationLock(fn) {
       }
     }
   }
+}
+
+export async function withLegacyMigrationWebLock(fn) {
+  const locks = globalThis.navigator?.locks;
+  if (locks && typeof locks.request === 'function') {
+    return locks.request(LEGACY_MIGRATION_LOCK_NAME, { mode: 'exclusive' }, () => fn());
+  }
+  return withLegacyMigrationLock(fn);
 }
 
 /**
@@ -700,6 +712,12 @@ export const StorageService = {
 
   ensureLegacyMigrated() {
     migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+  },
+
+  async ensureLegacyMigratedAsync() {
+    await withLegacyMigrationWebLock(() => {
+      migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+    });
   },
 
   migrateLegacyForOwner(ownerId) {
@@ -1024,3 +1042,11 @@ export const StorageService = {
     }
   }
 };
+
+/** Independent working-copy owner for two-tab / two-module tests. Shares localStorage. */
+export function createStorageService() {
+  const service = Object.create(StorageService);
+  service._ownerId = ANONYMOUS_OWNER_ID;
+  service._anonymous = true;
+  return service;
+}
