@@ -22,6 +22,7 @@ import {
   legacyMigrationClaimKey,
   orphanedWorkingCopyKey,
   workingCopyKey,
+  ORPHAN_ENVELOPE_VERSION,
 } from '../src/js/storage.js';
 
 const originalFetch = globalThis.fetch;
@@ -83,6 +84,33 @@ function storageError(name = 'QuotaExceededError') {
   return err;
 }
 
+function parseOrphanStored(stored) {
+  const parsed = JSON.parse(stored);
+  if (parsed && parsed.v === ORPHAN_ENVELOPE_VERSION && typeof parsed.raw === 'string') {
+    return { envelope: parsed, payload: JSON.parse(parsed.raw) };
+  }
+  return { envelope: null, payload: parsed };
+}
+
+function orphanPayload(suffix) {
+  const stored = localStorage.getItem(orphanedWorkingCopyKey(suffix));
+  if (stored == null) return null;
+  return parseOrphanStored(stored).payload;
+}
+
+function writeOwnerOrphan(suffix, value, namespaceId) {
+  const key = orphanedWorkingCopyKey(suffix);
+  localStorage.setItem(key, JSON.stringify({
+    v: ORPHAN_ENVELOPE_VERSION,
+    namespaceId,
+    suffix,
+    raw: JSON.stringify(value),
+    recoveredFrom: 'legacy-conflict',
+    quarantinedAt: 1,
+  }));
+  return key;
+}
+
 function userPlace(overrides = {}) {
   return {
     id: 'place_user_cafe',
@@ -133,6 +161,7 @@ describe('namespaced browser storage', () => {
   });
 
   afterEach(() => {
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = undefined;
     globalThis.fetch = originalFetch;
     globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);
@@ -214,9 +243,7 @@ describe('namespaced browser storage', () => {
 
     expect(StorageService.getHomeAddress().name).toBe('Already migrated');
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe(
-      'Stale leftover',
-    );
+    expect(orphanPayload(WORKING_COPY_KEYS.HOME_ADDRESS).name).toBe('Stale leftover');
   });
 
   test('reading working-copy keys before setOwner migrates legacy data instead of seeding over it', () => {
@@ -404,7 +431,7 @@ describe('namespaced browser storage', () => {
     localStorage.setItem(LEGACY_WORKING_COPY_KEYS.saved_places, JSON.stringify(leftover));
     StorageService.setOwner(null);
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES)))).toEqual(leftover);
+    expect(orphanPayload(WORKING_COPY_KEYS.SAVED_PLACES)).toEqual(leftover);
     expect(StorageService.getSavedPlaces().every(isDemoPlace)).toBe(true);
   });
 
@@ -421,7 +448,7 @@ describe('namespaced browser storage', () => {
 
     expect(StorageService.getHomeAddress()).toEqual(destHome);
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toEqual(leftoverHome);
+    expect(orphanPayload(WORKING_COPY_KEYS.HOME_ADDRESS)).toEqual(leftoverHome);
     expect(StorageService.getSavedPlaces()).toEqual(leftoverPlaces);
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
   });
@@ -440,7 +467,7 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS))).toBe('{not-json');
     expect(StorageService.getHomeAddress()).toBeNull();
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toEqual(leftover);
+    expect(orphanPayload(WORKING_COPY_KEYS.HOME_ADDRESS)).toEqual(leftover);
   });
 
   test('empty destination values are treated as present and divergent leftover is kept', () => {
@@ -458,8 +485,8 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.SAVED_PLACES))).toBe('[]');
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toEqual(leftoverHome);
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES)))).toEqual(leftoverPlaces);
+    expect(orphanPayload(WORKING_COPY_KEYS.HOME_ADDRESS)).toEqual(leftoverHome);
+    expect(orphanPayload(WORKING_COPY_KEYS.SAVED_PLACES)).toEqual(leftoverPlaces);
   });
 
   test('older-tab write after dest exists is preserved on a later migrate pass', () => {
@@ -476,9 +503,7 @@ describe('namespaced browser storage', () => {
 
     expect(StorageService.getHomeAddress().name).toBe('Current dest');
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe(
-      'Newer leftover from older tab',
-    );
+    expect(orphanPayload(WORKING_COPY_KEYS.HOME_ADDRESS).name).toBe('Newer leftover from older tab');
   });
 
   test('editing a demo seed converts it into user-authored data', () => {
@@ -507,8 +532,8 @@ describe('namespaced browser storage', () => {
 
     StorageService.setOwner(null);
     const retainedAfterAnonymousPass = localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places) == null
-      && JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES)))
-        .some((place) => place.name === 'Alice-leftover');
+      && orphanPayload(WORKING_COPY_KEYS.SAVED_PLACES)
+        ?.some((place) => place.name === 'Alice-leftover');
     expect(retainedAfterAnonymousPass).toBe(true);
     expect(StorageService.getSavedPlaces().some((place) => place.name === 'Alice-leftover')).toBe(false);
 
@@ -516,7 +541,7 @@ describe('namespaced browser storage', () => {
     const bobPlaces = StorageService.getSavedPlaces().map((place) => place.name);
     expect(bobPlaces).not.toContain('Alice-leftover');
     expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.saved_places)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES))))
+    expect(orphanPayload(WORKING_COPY_KEYS.SAVED_PLACES))
       .toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Alice-leftover' })]));
   });
 
@@ -598,7 +623,7 @@ describe('namespaced browser storage', () => {
 
     expect(localStorage.getItem(destKey)).toBe(oldVal);
     expect(localStorage.getItem(legacyKey)).toBeNull();
-    expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe('new');
+    expect(orphanPayload(WORKING_COPY_KEYS.HOME_ADDRESS).name).toBe('new');
   });
 
   test('failed legacy-key cleanup does not let the next account adopt the data', () => {
@@ -737,8 +762,19 @@ describe('namespaced browser storage', () => {
     globalThis.localStorage = wrapLocalStorage(inner, {
       setItem(key, value, store) {
         store.setItem(key, value);
-        if (key.startsWith('neighborhood_guru:orphaned:') && value === midVal) {
-          store.setItem(legacyKey, latestVal);
+        if (key.startsWith('neighborhood_guru:orphaned:')) {
+          let raw = value;
+          try {
+            const parsed = JSON.parse(value);
+            if (parsed && parsed.v === ORPHAN_ENVELOPE_VERSION && typeof parsed.raw === 'string') {
+              raw = parsed.raw;
+            }
+          } catch {
+            // Keep the stored string when the orphan write is not JSON.
+          }
+          if (raw === midVal || value === midVal) {
+            store.setItem(legacyKey, latestVal);
+          }
         }
       },
     });
@@ -750,7 +786,7 @@ describe('namespaced browser storage', () => {
       const key = localStorage.key(i);
       if (key && key.startsWith('neighborhood_guru:orphaned:')) orphanKeys.push(key);
     }
-    const orphanValues = orphanKeys.map((key) => JSON.parse(localStorage.getItem(key)).name);
+    const orphanValues = orphanKeys.map((key) => parseOrphanStored(localStorage.getItem(key)).payload.name);
     expect({
       dest: JSON.parse(localStorage.getItem(destKey)).name,
       orphan: orphanValues.includes('mid') ? 'mid' : orphanValues[0],
@@ -768,9 +804,10 @@ describe('namespaced browser storage', () => {
   test('orphaned leftovers are included in export and recoverable via preview/restore', () => {
     StorageService.setOwner(null);
     StorageService.setHomeAddress({ name: 'current', lat: 1, lng: 1 });
-    localStorage.setItem(
-      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
-      JSON.stringify({ name: 'recover me', lat: 9, lng: 9 }),
+    writeOwnerOrphan(
+      WORKING_COPY_KEYS.HOME_ADDRESS,
+      { name: 'recover me', lat: 9, lng: 9 },
+      ANONYMOUS_OWNER_ID,
     );
 
     const exported = JSON.parse(StorageService.exportDataJSON());
@@ -779,6 +816,7 @@ describe('namespaced browser storage', () => {
     expect(exported.orphanedWorkingCopies.some((orphan) => (
       orphan.status === 'orphaned'
       && orphan.homeAddress?.name === 'recover me'
+      && typeof orphan.raw === 'string'
     ))).toBe(true);
 
     const preview = StorageService.previewOrphanedWorkingCopies();
@@ -799,9 +837,10 @@ describe('namespaced browser storage', () => {
   test('orphaned places can be merged into the current namespace after preview', () => {
     StorageService.setOwner(SESSION_A.user.id);
     StorageService.savePlace(userPlace({ id: undefined, name: 'Ada current cafe' }));
-    localStorage.setItem(
-      orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES),
-      JSON.stringify([userPlace({ id: 'place_orphan', name: 'recover me cafe' })]),
+    writeOwnerOrphan(
+      WORKING_COPY_KEYS.SAVED_PLACES,
+      [userPlace({ id: 'place_orphan', name: 'recover me cafe' })],
+      `user:${SESSION_A.user.id}`,
     );
 
     const preview = StorageService.previewOrphanedWorkingCopy(
@@ -814,6 +853,129 @@ describe('namespaced browser storage', () => {
     const names = StorageService.getSavedPlaces().map((place) => place.name);
     expect(names).toEqual(expect.arrayContaining(['Ada current cafe', 'recover me cafe']));
   });
+
+  test('two namespaces cannot both adopt the same leftover when claims race', () => {
+    const home = { name: 'shared legacy private home', lat: 1, lng: 1 };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(home));
+    let bobRan = false;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
+      if (phase === 'after-absent-claim-read'
+        && detail.namespaceId === `user:${SESSION_A.user.id}`
+        && !bobRan) {
+        bobRan = true;
+        StorageService.migrateLegacyForOwner(SESSION_B.user.id);
+      }
+    };
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const alice = StorageService.getHomeAddress()?.name ?? null;
+    StorageService.setOwner(SESSION_B.user.id);
+    const bob = StorageService.getHomeAddress()?.name ?? null;
+    const claim = JSON.parse(localStorage.getItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS)) || 'null');
+
+    expect(alice === 'shared legacy private home' && bob === 'shared legacy private home').toBe(false);
+    expect(alice === 'shared legacy private home' || bob === 'shared legacy private home').toBe(true);
+    expect(claim?.namespaceId === `user:${SESSION_A.user.id}` || claim?.namespaceId === `user:${SESSION_B.user.id}`).toBe(true);
+  });
+
+  test('malformed migration claims fail closed and are not adopted', () => {
+    const home = { name: 'Alice private', lat: 1, lng: 1 };
+    localStorage.setItem(LEGACY_WORKING_COPY_KEYS.home_address, JSON.stringify(home));
+    localStorage.setItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS), '{not-json');
+
+    StorageService.setOwner(SESSION_B.user.id);
+    expect(StorageService.getHomeAddress()?.name).not.toBe('Alice private');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeString();
+    expect(localStorage.getItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS))).toBe('{not-json');
+  });
+
+  test('Bob cannot preview or restore Alice orphaned leftovers', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress({ name: 'Ada current', lat: 1, lng: 1 });
+    writeOwnerOrphan(
+      WORKING_COPY_KEYS.HOME_ADDRESS,
+      { name: 'Alice orphan', lat: 9, lng: 9 },
+      `user:${SESSION_A.user.id}`,
+    );
+
+    StorageService.setOwner(SESSION_B.user.id);
+    const bobCanPreview = StorageService.previewOrphanedWorkingCopy(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+    const restore = StorageService.restoreOrphanedWorkingCopy(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+      { mode: 'replace' },
+    );
+    expect(bobCanPreview).toBeNull();
+    expect(restore.ok).toBe(false);
+    expect(restore.reason).toBe('wrong-owner');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    expect(StorageService.listOrphanedWorkingCopies()).toEqual([]);
+  });
+
+  test('restoring malformed orphaned places does not erase current data', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.savePlace(userPlace({ id: undefined, name: 'Keep' }));
+    const key = orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES);
+    localStorage.setItem(key, JSON.stringify({
+      v: ORPHAN_ENVELOPE_VERSION,
+      namespaceId: `user:${SESSION_A.user.id}`,
+      suffix: WORKING_COPY_KEYS.SAVED_PLACES,
+      raw: '{not-json',
+      recoveredFrom: 'legacy-conflict',
+      quarantinedAt: 1,
+    }));
+
+    const result = StorageService.restoreOrphanedWorkingCopy(key, { mode: 'replace' });
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'invalid' }));
+    expect(StorageService.getSavedPlaces().some((place) => place.name === 'Keep')).toBe(true);
+  });
+
+  test('orphan export includes the exact raw payload for a lossless round trip', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    const raw = '{not-json leftover';
+    const key = orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS);
+    localStorage.setItem(key, JSON.stringify({
+      v: ORPHAN_ENVELOPE_VERSION,
+      namespaceId: `user:${SESSION_A.user.id}`,
+      suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
+      raw,
+      recoveredFrom: 'legacy-conflict',
+      quarantinedAt: 1,
+    }));
+
+    const exported = JSON.parse(StorageService.exportDataJSON());
+    const orphan = exported.orphanedWorkingCopies.find((item) => item.key === key);
+    expect(orphan.raw).toBe(raw);
+
+    localStorage.removeItem(key);
+    expect(StorageService.importDataJSON(JSON.stringify(exported))).toBe(true);
+    const stored = JSON.parse(localStorage.getItem(key));
+    expect(stored.raw).toBe(raw);
+  });
+
+  test('unscoped historical orphans are device-level and do not bind to Bob', () => {
+    StorageService.setOwner(SESSION_B.user.id);
+    localStorage.setItem(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+      JSON.stringify({ name: 'ambiguous leftover', lat: 4, lng: 4 }),
+    );
+    expect(StorageService.listOrphanedWorkingCopies()).toEqual([]);
+    const device = StorageService.listDeviceOrphanedWorkingCopies();
+    expect(device.some((orphan) => orphan.preview.homeName === 'ambiguous leftover')).toBe(true);
+    const restore = StorageService.restoreOrphanedWorkingCopy(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+    expect(restore.ok).toBe(false);
+    expect(restore.reason).toBe('device-level');
+    expect(StorageService.getHomeAddress()).toBeNull();
+    const exported = StorageService.exportDeviceOrphanedWorkingCopy(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+    expect(exported.ok).toBe(true);
+    expect(exported.raw).toContain('ambiguous leftover');
+  });
 });
 
 describe('working-copy bind and login I/O', () => {
@@ -823,6 +985,7 @@ describe('working-copy bind and login I/O', () => {
   });
 
   afterEach(() => {
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = undefined;
     globalThis.fetch = originalFetch;
     globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);

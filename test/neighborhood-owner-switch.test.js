@@ -159,6 +159,12 @@ function createStubMapbox({ geocode } = {}) {
       this.lastMarker = coords;
       this.markerOrder.push(coords);
     },
+    unbindMapListeners() { this.unbound = true; },
+    teardownMap() {
+      this.tornDown = true;
+      this.unbound = true;
+      this.removed = true;
+    },
     flyToLocation(lat, lng) {
       this.lastFly = { lat, lng };
     },
@@ -706,5 +712,104 @@ describe('owner-switch presentation isolation', () => {
     expect(mapboxService.markerOrder.at(-1)).toEqual({ lat: 2, lng: 2 });
 
     app.dispose();
+  });
+
+  test('concurrent same-owner map clicks keep the newer marker', async () => {
+    const resolvers = [];
+    const mapboxService = createStubMapbox({
+      geocode: () => new Promise((resolve) => {
+        resolvers.push(resolve);
+      }),
+    });
+    const ui = createStubUi();
+    StorageService.setOwner(SESSION_A.user.id);
+    const { app } = await createBoundApp({ ui, mapboxService, session: SESSION_A });
+
+    const first = app.onMapClicked({ lat: 1, lng: 1 });
+    const second = app.onMapClicked({ lat: 2, lng: 2 });
+    resolvers[1]({ name: 'two', lat: 2, lng: 2 });
+    await second;
+    resolvers[0]({ name: 'one', lat: 1, lng: 1 });
+    await first;
+
+    expect(mapboxService.lastMarker).toEqual({ lat: 2, lng: 2 });
+    expect(ui.formOpen).toBe(true);
+
+    app.dispose();
+  });
+
+  test('concurrent JamBase searches in one editor keep the newer results', async () => {
+    const resolvers = [];
+    JamBaseService.searchVenues = async () => new Promise((resolve) => {
+      resolvers.push(resolve);
+    });
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Venue', lat: 1, lng: 1 });
+    ui.elements.formName.value = 'Venue';
+    ui.jambaseRenders = [];
+    const originalRender = ui.renderJambaseSearchResults.bind(ui);
+    ui.renderJambaseSearchResults = (matches, onSelect) => {
+      ui.jambaseRenders.push(matches.map((match) => match.id));
+      originalRender(matches, onSelect);
+    };
+
+    const first = app.handleJambaseSearch();
+    const second = app.handleJambaseSearch();
+    resolvers[1]([{ id: 'newer' }]);
+    await second;
+    resolvers[0]([{ id: 'older' }]);
+    await first;
+
+    expect(ui.jambaseRenders.at(-1)).toEqual(['newer']);
+    expect(ui.jambaseRenders).not.toEqual(expect.arrayContaining([['older']]));
+
+    app.dispose();
+  });
+
+  test('dispose during auth.initialize does not reject init', async () => {
+    let release;
+    const client = new FakeAuthClient({ session: SESSION_A });
+    const originalLoadSession = client.loadSession.bind(client);
+    client.loadSession = () => new Promise((resolve) => {
+      release = () => resolve(originalLoadSession());
+    });
+    const ui = createStubUi();
+    const app = new NeighborhoodGuruApp({
+      storage: StorageService,
+      ui,
+      mapboxService: createStubMapbox(),
+      auth: createAuthState(client),
+    });
+    const initPromise = app.init();
+    for (let i = 0; i < 10 && typeof release !== 'function'; i += 1) {
+      await Promise.resolve();
+    }
+    expect(typeof release).toBe('function');
+    app.dispose();
+    release();
+    await expect(initPromise).resolves.toBeUndefined();
+  });
+
+  test('teardown unregisters map load handlers and ignores late loads', async () => {
+    const { MapboxService } = await import('../src/js/mapbox-service.js');
+    const service = new MapboxService();
+    const map = {
+      handlers: [],
+      on(type, fn) { this.handlers.push({ type, fn }); },
+      off(type, fn) { this.handlers = this.handlers.filter((entry) => entry.fn !== fn); },
+      remove() { this.removed = true; },
+    };
+    service.map = map;
+    let renders = 0;
+    service.bindMapEvent('load', () => { renders += 1; });
+    expect(map.handlers.filter((entry) => entry.type === 'load')).toHaveLength(1);
+    service.teardownMap();
+    expect(service.tornDown).toBe(true);
+    expect(map.removed).toBe(true);
+    expect(map.handlers.filter((entry) => entry.type === 'load')).toHaveLength(0);
+    map.handlers.forEach((entry) => entry.fn());
+    expect(renders).toBe(0);
   });
 });

@@ -279,80 +279,178 @@ function listStorageKeys() {
   return keys;
 }
 
+export const ORPHAN_ENVELOPE_VERSION = 1;
+
 function matchesCopiedValue(value, copied) {
   return value === copied || storageValuesEquivalent(value, copied);
 }
 
-function parseMigrationClaim(raw) {
-  const parsed = parseJsonOr(raw, null);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  if (typeof parsed.namespaceId !== 'string' || parsed.namespaceId.length === 0) return null;
-  return parsed;
+function mintNonce() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-function readMigrationClaim(suffix) {
-  return parseMigrationClaim(readItem(legacyMigrationClaimKey(suffix)));
-}
-
-function persistMigrationClaim(suffix, namespaceId, sourceValue) {
-  const payload = JSON.stringify({
-    namespaceId,
-    source: sourceValue,
-    claimedAt: Date.now(),
-  });
-  const key = legacyMigrationClaimKey(suffix);
+function migrationInterleave(phase, detail) {
   try {
-    writeItem(key, payload);
-    const stored = parseMigrationClaim(readItem(key));
-    return stored?.namespaceId === namespaceId;
+    globalThis.__NG_MIGRATION_INTERLEAVE__?.(phase, detail);
   } catch {
-    return false;
-  }
-}
-
-function clearMigrationClaim(suffix) {
-  try {
-    removeItem(legacyMigrationClaimKey(suffix));
-  } catch {
-    // A leftover claim still blocks other namespaces; retry later.
+    // Test hooks must not break fail-closed migration.
   }
 }
 
 /**
- * Move a leftover off the adoptable unprefixed key so a later empty account
- * cannot inherit it. Orphaned keys are never adopted by migrate/load; they
- * remain recoverable through export and the orphan preview/restore API.
+ * Absent vs present-but-invalid vs valid. Invalid claims fail closed: do not
+ * copy or delete the leftover, and do not overwrite the claim.
  */
-function quarantineLegacyValue(suffix, value) {
+function inspectMigrationClaim(suffix) {
+  const raw = readItem(legacyMigrationClaimKey(suffix));
+  if (raw == null) return { kind: 'absent' };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'invalid' };
+    if (typeof parsed.namespaceId !== 'string' || parsed.namespaceId.length === 0) return { kind: 'invalid' };
+    if (typeof parsed.nonce !== 'string' || parsed.nonce.length === 0) return { kind: 'invalid' };
+    return { kind: 'valid', claim: parsed };
+  } catch {
+    return { kind: 'invalid' };
+  }
+}
+
+function writeMigrationClaim(suffix, claim) {
+  writeItem(legacyMigrationClaimKey(suffix), JSON.stringify(claim));
+}
+
+function claimStillHeld(suffix, nonce, namespaceId) {
+  const inspected = inspectMigrationClaim(suffix);
+  return inspected.kind === 'valid'
+    && inspected.claim.nonce === nonce
+    && inspected.claim.namespaceId === namespaceId;
+}
+
+function claimOutcomeFromInspection(inspected, namespaceId) {
+  if (inspected.kind === 'invalid') return { ok: false, reason: 'invalid' };
+  if (inspected.kind === 'valid' && inspected.claim.namespaceId !== namespaceId) {
+    return { ok: false, reason: 'foreign', claim: inspected.claim };
+  }
+  if (inspected.kind === 'valid') {
+    return { ok: true, nonce: inspected.claim.nonce, existing: true, claim: inspected.claim };
+  }
+  return null;
+}
+
+/**
+ * Compare-and-swap claim. Re-reads immediately before and after the write so
+ * a last-writer-wins localStorage value cannot let two namespaces both copy.
+ * Never overwrites a present claim (valid or invalid).
+ */
+function tryAcquireClaim(suffix, namespaceId, fingerprint) {
+  const before = inspectMigrationClaim(suffix);
+  const early = claimOutcomeFromInspection(before, namespaceId);
+  if (early) return early;
+
+  migrationInterleave('after-absent-claim-read', { suffix, namespaceId });
+  const afterRead = inspectMigrationClaim(suffix);
+  const afterReadOutcome = claimOutcomeFromInspection(afterRead, namespaceId);
+  if (afterReadOutcome) return afterReadOutcome;
+
+  const nonce = mintNonce();
+  const claim = {
+    nonce,
+    namespaceId,
+    fingerprint,
+    status: 'pending',
+    claimedAt: Date.now(),
+  };
+  migrationInterleave('before-claim-write', { suffix, namespaceId, nonce });
+  const preWrite = inspectMigrationClaim(suffix);
+  const preWriteOutcome = claimOutcomeFromInspection(preWrite, namespaceId);
+  if (preWriteOutcome) return preWriteOutcome;
+  if (preWrite.kind !== 'absent') return { ok: false, reason: 'invalid' };
+  writeMigrationClaim(suffix, claim);
+  migrationInterleave('after-claim-write', { suffix, namespaceId, nonce });
+  if (!claimStillHeld(suffix, nonce, namespaceId)) {
+    return { ok: false, reason: 'lost-race' };
+  }
+  return { ok: true, nonce, existing: false, claim };
+}
+
+function updateHeldClaim(suffix, nonce, namespaceId, patch) {
+  if (!claimStillHeld(suffix, nonce, namespaceId)) return false;
+  const inspected = inspectMigrationClaim(suffix);
+  if (inspected.kind !== 'valid') return false;
+  writeMigrationClaim(suffix, { ...inspected.claim, ...patch });
+  return claimStillHeld(suffix, nonce, namespaceId);
+}
+
+function wrapOrphanEnvelope(suffix, raw, namespaceId, recoveredFrom = 'legacy-conflict') {
+  return JSON.stringify({
+    v: ORPHAN_ENVELOPE_VERSION,
+    namespaceId: namespaceId ?? null,
+    suffix,
+    raw,
+    recoveredFrom,
+    quarantinedAt: Date.now(),
+  });
+}
+
+function parseOrphanEnvelope(stored) {
+  const parsed = parseJsonOr(stored, null);
+  if (parsed && parsed.v === ORPHAN_ENVELOPE_VERSION && typeof parsed.raw === 'string') {
+    return {
+      envelope: true,
+      namespaceId: typeof parsed.namespaceId === 'string' && parsed.namespaceId.length > 0
+        ? parsed.namespaceId
+        : null,
+      suffix: typeof parsed.suffix === 'string' ? parsed.suffix : null,
+      raw: parsed.raw,
+      recoveredFrom: parsed.recoveredFrom || 'legacy-conflict',
+    };
+  }
+  return {
+    envelope: false,
+    namespaceId: null,
+    suffix: null,
+    raw: stored,
+    recoveredFrom: 'legacy-conflict',
+  };
+}
+
+/**
+ * Move a leftover off the adoptable unprefixed key. The envelope stamps the
+ * claiming namespace so another account cannot preview/restore it.
+ */
+function quarantineLegacyValue(suffix, value, namespaceId = null) {
+  const envelope = wrapOrphanEnvelope(suffix, value, namespaceId);
   const primary = orphanedWorkingCopyKey(suffix);
   const existing = readItem(primary);
   if (existing == null) {
-    writeItem(primary, value);
-    return matchesCopiedValue(readItem(primary), value);
+    writeItem(primary, envelope);
+    return readItem(primary) === envelope;
   }
-  if (matchesCopiedValue(existing, value)) {
+  const existingParsed = parseOrphanEnvelope(existing);
+  if (existingParsed.raw === value && (existingParsed.namespaceId === namespaceId || existingParsed.namespaceId == null)) {
     return true;
   }
   const overflow = orphanedWorkingCopyKey(
     suffix,
     `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
   );
-  writeItem(overflow, value);
-  return matchesCopiedValue(readItem(overflow), value);
+  writeItem(overflow, envelope);
+  return readItem(overflow) === envelope;
 }
 
 /**
- * Re-read the unprefixed source immediately before removal. Delete only if it
- * still equals the copied/quarantined snapshot; otherwise preserve the newer
- * value under an orphan key. Covers the post-read / pre-remove window.
+ * Re-read the source immediately before removal. Delete only if it still
+ * equals the copied/quarantined snapshot *and* the claim nonce still holds.
  */
-function removeLegacyIfUnchanged(legacyKey, expected, suffix, depth = 0) {
+function removeLegacyIfUnchanged(legacyKey, expected, suffix, namespaceId, nonce, depth = 0) {
   if (depth > 8) return false;
+  migrationInterleave('before-remove', { suffix, namespaceId, nonce, expected });
+  if (nonce && !claimStillHeld(suffix, nonce, namespaceId)) return false;
   const latest = readItem(legacyKey);
   if (latest == null) return true;
   if (!matchesCopiedValue(latest, expected)) {
-    if (!quarantineLegacyValue(suffix, latest)) return false;
-    return removeLegacyIfUnchanged(legacyKey, latest, suffix, depth + 1);
+    if (!quarantineLegacyValue(suffix, latest, namespaceId)) return false;
+    return removeLegacyIfUnchanged(legacyKey, latest, suffix, namespaceId, nonce, depth + 1);
   }
   try {
     removeItem(legacyKey);
@@ -362,83 +460,113 @@ function removeLegacyIfUnchanged(legacyKey, expected, suffix, depth = 0) {
   const after = readItem(legacyKey);
   if (after == null) return true;
   if (!matchesCopiedValue(after, expected)) {
-    if (!quarantineLegacyValue(suffix, after)) return false;
-    return removeLegacyIfUnchanged(legacyKey, after, suffix, depth + 1);
+    if (!quarantineLegacyValue(suffix, after, namespaceId)) return false;
+    return removeLegacyIfUnchanged(legacyKey, after, suffix, namespaceId, nonce, depth + 1);
   }
   return false;
 }
 
+function withLegacyMigrationLock(fn) {
+  const lockKey = 'neighborhood_guru:legacy-migrate-lock';
+  const token = mintNonce();
+  const now = Date.now();
+  let held = false;
+  try {
+    const existing = parseJsonOr(readItem(lockKey), null);
+    if (existing && typeof existing.token === 'string' && typeof existing.expires === 'number' && existing.expires > now) {
+      // Another tab holds the sync fallback lock. Still run: Web Locks are
+      // async-only, and nonce CAS is the actual exclusive claim.
+    } else {
+      writeItem(lockKey, JSON.stringify({ token, expires: now + 5000 }));
+      const confirm = parseJsonOr(readItem(lockKey), null);
+      held = confirm?.token === token;
+    }
+  } catch {
+    return fn();
+  }
+  try {
+    return fn();
+  } finally {
+    if (held) {
+      try {
+        const current = parseJsonOr(readItem(lockKey), null);
+        if (current?.token === token) removeItem(lockKey);
+      } catch {
+        // Lock expiry is best-effort.
+      }
+    }
+  }
+}
+
 /**
- * Move unprefixed working-copy keys into the active namespace once.
- * Local only — never an upload.
- *
- * A durable claim is persisted before copying so a leftover that survives
- * a failed `removeItem` stays bound to that namespace and cannot be adopted
- * by a later empty account. A leftover is removed only after a re-read
- * immediately before deletion still matches the copied or quarantined value.
+ * One-time local bootstrap of unprefixed keys into the namespace that first
+ * claims them. Later owners never adopt a leftover bound to another claim,
+ * an invalid claim, or a completed migration. Local only — never an upload.
  */
 function migrateLegacyWorkingCopy(anonymous, ownerId) {
   const namespaceId = namespaceIdFor(anonymous, ownerId);
+  withLegacyMigrationLock(() => {
+    for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+      try {
+        const copied = readItem(legacyKey);
+        const inspected = inspectMigrationClaim(suffix);
 
-  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
-    try {
-      const copied = readItem(legacyKey);
-      if (copied == null) {
-        const claim = readMigrationClaim(suffix);
-        if (claim?.namespaceId === namespaceId) clearMigrationClaim(suffix);
-        continue;
-      }
-
-      const existingClaim = readMigrationClaim(suffix);
-      if (existingClaim && existingClaim.namespaceId !== namespaceId) {
-        if (quarantineLegacyValue(suffix, copied) && removeLegacyIfUnchanged(legacyKey, copied, suffix)) {
-          clearMigrationClaim(suffix);
+        if (inspected.kind === 'invalid') {
+          continue;
         }
-        continue;
-      }
 
-      if (!persistMigrationClaim(suffix, namespaceId, copied)) {
-        // Without a durable claim the leftover would stay globally adoptable
-        // after a later cleanup failure. Fail closed: do not copy.
-        continue;
-      }
-
-      const destKey = namespaceKey(anonymous, ownerId, suffix);
-      const dest = readItem(destKey);
-      if (dest == null) {
-        writeItem(destKey, copied);
-      }
-
-      const destNow = readItem(destKey);
-      const sourceNow = readItem(legacyKey);
-      if (sourceNow == null) {
-        clearMigrationClaim(suffix);
-        continue;
-      }
-
-      const destMatchesCopied = destNow != null && matchesCopiedValue(destNow, copied);
-      const sourceMatchesCopied = matchesCopiedValue(sourceNow, copied);
-      if (destMatchesCopied && sourceMatchesCopied) {
-        if (removeLegacyIfUnchanged(legacyKey, copied, suffix)) {
-          clearMigrationClaim(suffix);
+        if (copied == null) {
+          continue;
         }
-        continue;
-      }
 
-      // Copy did not land; keep the claim so another namespace cannot adopt,
-      // and leave the leftover for a same-owner retry.
-      if (destNow == null) continue;
+        if (inspected.kind === 'valid' && inspected.claim.namespaceId !== namespaceId) {
+          continue;
+        }
 
-      // Dest has data that is not a proven copy of the current source, or the
-      // source changed after we copied. Quarantine so later accounts cannot adopt.
-      if (quarantineLegacyValue(suffix, sourceNow) && removeLegacyIfUnchanged(legacyKey, sourceNow, suffix)) {
-        clearMigrationClaim(suffix);
+        const acquired = tryAcquireClaim(suffix, namespaceId, copied);
+        if (!acquired.ok) continue;
+
+        const { nonce } = acquired;
+        migrationInterleave('before-copy', { suffix, namespaceId, nonce });
+        if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
+
+        const sourceNow = readItem(legacyKey);
+        if (sourceNow == null) {
+          updateHeldClaim(suffix, nonce, namespaceId, { status: 'migrated' });
+          continue;
+        }
+        if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
+
+        const destKey = namespaceKey(anonymous, ownerId, suffix);
+        const dest = readItem(destKey);
+        if (dest == null) {
+          if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
+          writeItem(destKey, sourceNow);
+        }
+
+        const destNow = readItem(destKey);
+        if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
+
+        const destMatches = destNow != null && matchesCopiedValue(destNow, sourceNow);
+        if (destMatches) {
+          if (removeLegacyIfUnchanged(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
+            updateHeldClaim(suffix, nonce, namespaceId, { status: 'migrated', fingerprint: sourceNow });
+          }
+          continue;
+        }
+
+        if (destNow == null) continue;
+
+        if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
+        if (quarantineLegacyValue(suffix, sourceNow, namespaceId)
+          && removeLegacyIfUnchanged(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
+          updateHeldClaim(suffix, nonce, namespaceId, { status: 'orphaned', fingerprint: sourceNow });
+        }
+      } catch {
+        // Claim, if held, still binds this leftover. Other namespaces must not adopt.
       }
-    } catch {
-      // Claim, if persisted, still binds this leftover to the initiating
-      // namespace. A later empty account must not adopt it.
     }
-  }
+  });
 }
 
 function orphanSuffixFromKey(key) {
@@ -451,14 +579,20 @@ function orphanSuffixFromKey(key) {
   return { suffix: rest, token: '' };
 }
 
-function decodeOrphanedRecord(key, raw) {
-  const { suffix, token } = orphanSuffixFromKey(key);
+function decodeOrphanedRecord(key, stored) {
+  const { suffix: keySuffix, token } = orphanSuffixFromKey(key);
+  const envelope = parseOrphanEnvelope(stored);
+  const suffix = envelope.suffix || keySuffix;
+  const raw = envelope.raw;
   const record = {
     key,
     suffix,
     token,
     status: 'orphaned',
-    recoveredFrom: 'legacy-conflict',
+    recoveredFrom: envelope.recoveredFrom || 'legacy-conflict',
+    namespaceId: envelope.namespaceId,
+    deviceLevel: envelope.namespaceId == null,
+    raw,
     homeAddress: null,
     savedPlaces: null,
   };
@@ -476,7 +610,16 @@ function decodeOrphanedRecord(key, raw) {
       : [],
     placeCount: Array.isArray(record.savedPlaces) ? record.savedPlaces.length : 0,
   };
+  record.valid = suffix === WORKING_COPY_KEYS.HOME_ADDRESS
+    ? record.homeAddress != null
+    : suffix === WORKING_COPY_KEYS.SAVED_PLACES
+      ? Array.isArray(record.savedPlaces)
+      : false;
   return record;
+}
+
+function orphanBelongsToNamespace(record, namespaceId) {
+  return Boolean(record && !record.deviceLevel && record.namespaceId === namespaceId);
 }
 
 function mergePlaceLists(current, incoming) {
@@ -557,6 +700,14 @@ export const StorageService = {
 
   ensureLegacyMigrated() {
     migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+  },
+
+  migrateLegacyForOwner(ownerId) {
+    if (ownerId == null || ownerId === ANONYMOUS_OWNER_ID || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
+      migrateLegacyWorkingCopy(true, ANONYMOUS_OWNER_ID);
+      return;
+    }
+    migrateLegacyWorkingCopy(false, ownerId);
   },
 
   workingCopyKey(suffix) {
@@ -722,21 +873,43 @@ export const StorageService = {
    * Orphans are never auto-merged into the working copy; restore/merge is explicit.
    */
   listOrphanedWorkingCopies() {
+    const namespaceId = this.getNamespaceId();
     return listStorageKeys()
       .filter(isOrphanedWorkingCopyKey)
       .map((key) => {
-        const raw = readItem(key);
-        if (raw == null) return null;
-        return decodeOrphanedRecord(key, raw);
+        const stored = readItem(key);
+        if (stored == null) return null;
+        return decodeOrphanedRecord(key, stored);
       })
-      .filter(Boolean);
+      .filter((record) => record && orphanBelongsToNamespace(record, namespaceId));
+  },
+
+  listDeviceOrphanedWorkingCopies() {
+    return listStorageKeys()
+      .filter(isOrphanedWorkingCopyKey)
+      .map((key) => {
+        const stored = readItem(key);
+        if (stored == null) return null;
+        return decodeOrphanedRecord(key, stored);
+      })
+      .filter((record) => record && record.deviceLevel);
   },
 
   previewOrphanedWorkingCopy(key) {
     if (!isOrphanedWorkingCopyKey(key)) return null;
-    const raw = readItem(key);
-    if (raw == null) return null;
-    return decodeOrphanedRecord(key, raw);
+    const stored = readItem(key);
+    if (stored == null) return null;
+    const record = decodeOrphanedRecord(key, stored);
+    if (!orphanBelongsToNamespace(record, this.getNamespaceId())) return null;
+    return record;
+  },
+
+  previewDeviceOrphanedWorkingCopy(key) {
+    if (!isOrphanedWorkingCopyKey(key)) return null;
+    const stored = readItem(key);
+    if (stored == null) return null;
+    const record = decodeOrphanedRecord(key, stored);
+    return record.deviceLevel ? record : null;
   },
 
   previewOrphanedWorkingCopies() {
@@ -745,33 +918,64 @@ export const StorageService = {
 
   /**
    * Copy a quarantined leftover into the *current* namespace after preview.
-   * `replace` overwrites the matching home/places key; `merge` unions places
-   * by id (current wins on conflict) and refuses to overwrite an existing home.
+   * Only orphans stamped with this namespace are eligible. Device-level
+   * historical values must use exportDeviceOrphanedWorkingCopy.
    */
   restoreOrphanedWorkingCopy(key, { mode = 'replace' } = {}) {
     const preview = this.previewOrphanedWorkingCopy(key);
-    if (!preview) return { ok: false, reason: 'not-found', preview: null };
+    if (!preview) {
+      const stored = isOrphanedWorkingCopyKey(key) ? readItem(key) : null;
+      if (stored == null) return { ok: false, reason: 'not-found', preview: null };
+      const record = decodeOrphanedRecord(key, stored);
+      if (record.deviceLevel) return { ok: false, reason: 'device-level', preview: record };
+      return { ok: false, reason: 'wrong-owner', preview: record };
+    }
+
+    if (!preview.valid) {
+      return { ok: false, reason: 'invalid', preview };
+    }
 
     if (preview.suffix === WORKING_COPY_KEYS.HOME_ADDRESS) {
       const currentHome = this.getHomeAddress();
       if (mode === 'merge' && currentHome) {
         return { ok: false, reason: 'conflict', preview, currentHome };
       }
-      if (!preview.homeAddress) return { ok: false, reason: 'empty', preview };
-      this.setHomeAddress(preview.homeAddress);
+      const parsed = parseJsonOr(preview.raw, null);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { ok: false, reason: 'invalid', preview };
+      }
+      this.setHomeAddress(parsed);
       return { ok: true, mode, preview };
     }
 
     if (preview.suffix === WORKING_COPY_KEYS.SAVED_PLACES) {
-      const incoming = Array.isArray(preview.savedPlaces) ? preview.savedPlaces : [];
+      const parsed = parseJsonOr(preview.raw, null);
+      if (!Array.isArray(parsed)) {
+        return { ok: false, reason: 'invalid', preview };
+      }
       const next = mode === 'merge'
-        ? mergePlaceLists(this.getSavedPlaces(), incoming)
-        : incoming;
+        ? mergePlaceLists(this.getSavedPlaces(), parsed)
+        : parsed;
       writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(next));
       return { ok: true, mode, preview };
     }
 
     return { ok: false, reason: 'unsupported-suffix', preview };
+  },
+
+  /**
+   * Device-level recovery does not bind ambiguous leftovers to the active
+   * account. Callers can download/export the exact raw payload.
+   */
+  exportDeviceOrphanedWorkingCopy(key) {
+    const preview = this.previewDeviceOrphanedWorkingCopy(key);
+    if (!preview) return { ok: false, reason: 'not-found' };
+    return {
+      ok: true,
+      key: preview.key,
+      raw: preview.raw,
+      recoveredFrom: preview.recoveredFrom,
+    };
   },
 
   exportDataJSON() {
@@ -781,6 +985,7 @@ export const StorageService = {
       homeAddress: this.getHomeAddress(),
       savedPlaces: this.getSavedPlaces(),
       orphanedWorkingCopies: this.listOrphanedWorkingCopies(),
+      deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
     };
     return JSON.stringify(backup, null, 2);
   },
@@ -792,20 +997,26 @@ export const StorageService = {
       if (Array.isArray(data.savedPlaces)) {
         writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
       }
-      if (Array.isArray(data.orphanedWorkingCopies)) {
-        for (const orphan of data.orphanedWorkingCopies) {
+      const importOrphans = (orphans, deviceLevel) => {
+        if (!Array.isArray(orphans)) return;
+        for (const orphan of orphans) {
           if (!orphan || typeof orphan.key !== 'string' || !isOrphanedWorkingCopyKey(orphan.key)) continue;
           let raw = null;
           if (typeof orphan.raw === 'string') {
             raw = orphan.raw;
-          } else if (orphan.homeAddress && typeof orphan.homeAddress === 'object') {
+          } else if (orphan.homeAddress && typeof orphan.homeAddress === 'object' && !Array.isArray(orphan.homeAddress)) {
             raw = JSON.stringify(orphan.homeAddress);
           } else if (Array.isArray(orphan.savedPlaces)) {
             raw = JSON.stringify(orphan.savedPlaces);
           }
-          if (raw != null) writeItem(orphan.key, raw);
+          if (raw == null) continue;
+          const namespaceId = deviceLevel ? null : (typeof orphan.namespaceId === 'string' ? orphan.namespaceId : this.getNamespaceId());
+          const suffix = typeof orphan.suffix === 'string' ? orphan.suffix : orphanSuffixFromKey(orphan.key).suffix;
+          writeItem(orphan.key, wrapOrphanEnvelope(suffix, raw, namespaceId, orphan.recoveredFrom || 'legacy-conflict'));
         }
-      }
+      };
+      importOrphans(data.orphanedWorkingCopies, false);
+      importOrphans(data.deviceOrphanedWorkingCopies, true);
       return true;
     } catch (e) {
       console.error('Failed to parse import JSON', e);

@@ -46,11 +46,19 @@ export class NeighborhoodGuruApp {
     this.editorNamespaceId = null;
     this.editorRevision = 0;
     this.eventAbort = new AbortController();
+    this.domListeners = [];
+    this.mapClickGeneration = 0;
+    this.jambaseSearchGeneration = 0;
   }
 
   async init() {
-    // Anonymous auth is provider-neutral and does not gate local data.
-    await this.auth.initialize();
+    try {
+      await this.auth.initialize();
+    } catch (err) {
+      if (this.disposed) return;
+      throw err;
+    }
+    if (this.disposed) return;
 
     // Bind after initialize() so restore has already settled (this call does
     // not observe AUTHENTICATING from loadSession). Later sign-in still goes
@@ -100,20 +108,18 @@ export class NeighborhoodGuruApp {
           homeAddress: this.homeAddress,
           preferredStyle: preferredStyle,
           onMapClick: (coords) => this.onMapClicked(coords),
+          onLoad: () => {
+            if (this.disposed || this.mapboxService.tornDown) return;
+            this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
+              this.openLocationEditor(place);
+            });
+          },
           onTokenError: () => {
             this.ui.updateKeyWarningState(false);
             this.ui.openKeyPromptModal(token);
             this.ui.showToast('Invalid Mapbox access token. Please check your key.', 'error');
           }
         });
-
-        if (map) {
-          map.on('load', () => {
-            this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
-              this.openLocationEditor(place);
-            });
-          });
-        }
       } catch (err) {
         console.warn('Mapbox initialization failed:', err);
         this.ui.updateKeyWarningState(false);
@@ -158,6 +164,8 @@ export class NeighborhoodGuruApp {
     this.poiDiscoveryGeneration = -1;
     this.bumpEditorRevision();
     this.editorNamespaceId = null;
+    this.mapClickGeneration += 1;
+    this.jambaseSearchGeneration += 1;
     try {
       this.ui.resetOwnerScopedPresentation?.();
       this.ui.updateWeatherDisplay?.(null);
@@ -236,7 +244,16 @@ export class NeighborhoodGuruApp {
   listen(target, type, handler) {
     if (this.disposed) return;
     if (!target || typeof target.addEventListener !== 'function') return;
-    target.addEventListener(type, handler, { signal: this.eventAbort.signal });
+    const wrapped = (event) => {
+      if (this.disposed) return;
+      handler(event);
+    };
+    try {
+      target.addEventListener(type, wrapped, { signal: this.eventAbort.signal });
+    } catch {
+      target.addEventListener(type, wrapped);
+    }
+    this.domListeners.push({ target, type, handler: wrapped });
   }
 
   dispose() {
@@ -244,6 +261,8 @@ export class NeighborhoodGuruApp {
     this.neighborhoodGeneration += 1;
     this.poiSearchGeneration += 1;
     this.addressSearchGeneration += 1;
+    this.mapClickGeneration += 1;
+    this.jambaseSearchGeneration += 1;
     this.bumpEditorRevision();
     this.editorNamespaceId = null;
     try {
@@ -251,7 +270,15 @@ export class NeighborhoodGuruApp {
     } catch {
       // Already aborted.
     }
-    this.mapboxService.unbindMapListeners?.();
+    for (const { target, type, handler } of this.domListeners) {
+      try {
+        target.removeEventListener(type, handler);
+      } catch {
+        // Node may already be gone.
+      }
+    }
+    this.domListeners = [];
+    this.mapboxService.teardownMap?.();
     if (this.sunAnimationTimer) {
       clearInterval(this.sunAnimationTimer);
       this.sunAnimationTimer = null;
@@ -769,9 +796,9 @@ export class NeighborhoodGuruApp {
   async onMapClicked(coords) {
     if (this.disposed) return;
     const generation = this.neighborhoodGeneration;
+    const operationId = ++this.mapClickGeneration;
     let placeName = '';
     
-    // Attempt reverse geocoding via Mapbox Places API
     try {
       const result = await this.mapboxService.geocodeAddress(`${coords.lng},${coords.lat}`);
       if (result) placeName = result.name;
@@ -779,7 +806,7 @@ export class NeighborhoodGuruApp {
       console.warn('Reverse geocoding failed', e);
     }
 
-    if (!this.isCurrentGeneration(generation)) return;
+    if (!this.isCurrentGeneration(generation) || operationId !== this.mapClickGeneration) return;
 
     const locationData = {
       lat: coords.lat,
@@ -788,7 +815,7 @@ export class NeighborhoodGuruApp {
     };
 
     this.mapboxService.showTempMarker(coords, () => {
-      if (!this.isCurrentGeneration(generation)) return;
+      if (!this.isCurrentGeneration(generation) || operationId !== this.mapClickGeneration) return;
       this.openLocationEditor(locationData);
     });
 
@@ -914,6 +941,8 @@ export class NeighborhoodGuruApp {
       return;
     }
 
+    const searchId = ++this.jambaseSearchGeneration;
+
     let locationContext = {};
     if (addressText) {
       const parts = addressText.split(',').map(s => s.trim());
@@ -933,7 +962,9 @@ export class NeighborhoodGuruApp {
 
     this.ui.showToast(`Searching JamBase for "${query}"...`, 'info');
     const matches = await JamBaseService.searchVenues(query, locationContext);
-    if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
+    if (!this.isSameOwnerGeneration(generation, namespaceId)
+      || !this.editorMatchesCurrentRequest(editorRevision)
+      || searchId !== this.jambaseSearchGeneration) return;
 
     this.ui.openJambasePickerModal();
     if (this.ui.elements.jambasePickerSubtitle) {
@@ -941,18 +972,24 @@ export class NeighborhoodGuruApp {
     }
 
     this.ui.renderJambaseSearchResults(matches, async (selectedVenue) => {
-      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
+      if (!this.isSameOwnerGeneration(generation, namespaceId)
+        || !this.editorMatchesCurrentRequest(editorRevision)
+        || searchId !== this.jambaseSearchGeneration) return;
 
       let capacity = selectedVenue.capacity;
       if (!capacity) {
         const details = await JamBaseService.fetchVenueDetails(selectedVenue.id);
-        if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
+        if (!this.isSameOwnerGeneration(generation, namespaceId)
+        || !this.editorMatchesCurrentRequest(editorRevision)
+        || searchId !== this.jambaseSearchGeneration) return;
         if (details && details.capacity) {
           capacity = details.capacity;
         }
       }
 
-      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
+      if (!this.isSameOwnerGeneration(generation, namespaceId)
+        || !this.editorMatchesCurrentRequest(editorRevision)
+        || searchId !== this.jambaseSearchGeneration) return;
 
       if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
 
@@ -1041,7 +1078,10 @@ export class NeighborhoodGuruApp {
 if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
     const app = new NeighborhoodGuruApp();
-    app.init();
+    app.init().catch((err) => {
+      if (app.disposed) return;
+      console.warn('Neighborhood Guru failed to initialize', err);
+    });
     if (import.meta.hot) {
       import.meta.hot.dispose(() => app.dispose());
     }
