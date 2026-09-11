@@ -1171,10 +1171,16 @@ describe('owner-switch presentation isolation', () => {
     ui.updateLegacyRecoveryBanner({ leftoverPresent: true, leftoverUnapplied: false, locksAvailable: true });
     expect(classes.has('hidden')).toBe(true);
 
-    ui.updateLegacyRecoveryBanner({ leftoverPresent: true, leftoverUnapplied: true, locksAvailable: false });
+    ui.updateLegacyRecoveryBanner({ leftoverPresent: true, leftoverUnapplied: true, leftoverAdoptable: true, locksAvailable: false });
     expect(classes.has('hidden')).toBe(false);
     expect(ui.elements.legacyRecoveryMessage.textContent).toContain('cannot take a Web Lock');
     expect(ui.elements.restoreLegacyBtn.disabled).toBe(true);
+
+    ui.updateLegacyRecoveryBanner({ leftoverPresent: true, leftoverUnapplied: true, leftoverAdoptable: false, locksAvailable: true });
+    expect(classes.has('hidden')).toBe(false);
+    expect(ui.elements.legacyRecoveryMessage.textContent).not.toContain('Restore it into this account');
+    expect(ui.elements.legacyRecoveryMessage.textContent).toContain('cannot be restored into this account');
+    expect(restoreClasses.has('hidden')).toBe(true);
   });
 
   test('disposed UI mutators do not write into mounted chrome', () => {

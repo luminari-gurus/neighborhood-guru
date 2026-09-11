@@ -168,6 +168,14 @@ function isNeighborhoodNetworkUrl(url) {
 function installFakeWebLocks() {
   const held = new Set();
   const queues = new Map();
+  const api = {
+    isHeld(name) {
+      return held.has(name);
+    },
+    queuedCount(name) {
+      return (queues.get(name) || []).length;
+    },
+  };
   globalThis.navigator = {
     ...(globalThis.navigator || {}),
     locks: {
@@ -201,6 +209,7 @@ function installFakeWebLocks() {
       },
     },
   };
+  return api;
 }
 
 function installGatedWebLocks() {
@@ -1350,7 +1359,62 @@ describe('namespaced browser storage', () => {
       expect(StorageService.legacyMigrationStatus()).toMatchObject({
         leftoverPresent: true,
         leftoverUnapplied: true,
+        leftoverAdoptable: true,
       });
+      const device = JSON.parse(StorageService.exportDeviceRecoveryJSON());
+      expect(device.pendingLegacyWorkingCopies.some((item) => item.preview?.homeName === 'unscoped leftover')).toBe(true);
+    } finally {
+      globalThis.navigator = previous;
+    }
+  });
+
+  test('Alice migrated leftover is not unapplied or exported for empty Bob', async () => {
+    localStorage.setItem(
+      LEGACY_WORKING_COPY_KEYS.home_address,
+      JSON.stringify({ name: 'Alice leftover home', lat: 1, lng: 1 }),
+    );
+    await bootstrapOwner(SESSION_A.user.id);
+    expect(StorageService.getHomeAddress()?.name).toBe('Alice leftover home');
+    expect(JSON.parse(localStorage.getItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS)))).toMatchObject({
+      namespaceId: `user:${SESSION_A.user.id}`,
+      status: 'migrated',
+    });
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe('Alice leftover home');
+
+    await bootstrapOwner(SESSION_B.user.id);
+    expect(StorageService.getHomeAddress()?.name).not.toBe('Alice leftover home');
+    const status = StorageService.legacyMigrationStatus();
+    expect(status.leftoverUnapplied).toBe(false);
+    expect(status.leftoverAdoptable).toBe(false);
+    expect(status.leftovers.some((item) => item.preview?.homeName === 'Alice leftover home')).toBe(false);
+    const device = JSON.parse(StorageService.exportDeviceRecoveryJSON());
+    expect(device.pendingLegacyWorkingCopies.some((item) => (
+      item.preview?.homeName === 'Alice leftover home' || item.raw?.includes('Alice leftover home')
+    ))).toBe(false);
+    expect(JSON.stringify(device)).not.toContain('Alice leftover home');
+    expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe('Alice leftover home');
+  });
+
+  test('no-lock leftover remains pending after dest write', () => {
+    const previous = globalThis.navigator;
+    globalThis.navigator = { ...(previous || {}), locks: undefined };
+    try {
+      localStorage.setItem(
+        LEGACY_WORKING_COPY_KEYS.home_address,
+        JSON.stringify({ name: 'unscoped leftover', lat: 3, lng: 3 }),
+      );
+      StorageService.setOwner(SESSION_B.user.id);
+      expect(StorageService.legacyMigrationStatus().leftoverUnapplied).toBe(true);
+      StorageService.savePlace(userPlace({ id: undefined, name: 'Bob cafe' }));
+      expect(JSON.parse(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).name).toBe('unscoped leftover');
+      expect(StorageService.legacyMigrationStatus()).toMatchObject({
+        leftoverPresent: true,
+        leftoverUnapplied: true,
+        leftoverAdoptable: true,
+      });
+      expect(localStorage.getItem(
+        authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.SAVED_PLACES),
+      )).toBeString();
       const device = JSON.parse(StorageService.exportDeviceRecoveryJSON());
       expect(device.pendingLegacyWorkingCopies.some((item) => item.preview?.homeName === 'unscoped leftover')).toBe(true);
     } finally {
@@ -1411,42 +1475,46 @@ describe('namespaced browser storage', () => {
     expect(bobRecords).not.toContain('Alice recovery');
   });
 
-  test('orphan imports paused after the same absence check keep both records', async () => {
+  test('queued-lock two-tab orphan imports keep both records', async () => {
+    const locks = installFakeWebLocks();
     const alice = createStorageService();
     const bob = createStorageService();
     alice.setOwner(SESSION_A.user.id, { migrate: false });
     bob.setOwner(SESSION_B.user.id, { migrate: false });
-    const waiters = [];
-    let bobPromise = null;
-    let bobStarted = false;
+    let releaseAlice = null;
+    let aliceAtBarrier = false;
     globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
       if (phase !== 'after-orphan-absent-read' || !detail.absent) return undefined;
-      if (!bobStarted) {
-        bobStarted = true;
-        bobPromise = bob.importDataJSON(JSON.stringify({
-          version: 1,
-          orphanedWorkingCopies: [{
-            suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
-            raw: JSON.stringify({ name: 'Bob recovery', lat: 2, lng: 2 }),
-          }],
-        }));
-      }
+      if (aliceAtBarrier) return undefined;
+      aliceAtBarrier = true;
       return new Promise((resolve) => {
-        waiters.push(resolve);
-        if (waiters.length >= 2) {
-          waiters.splice(0).forEach((release) => release());
-        }
+        releaseAlice = resolve;
       });
     };
-    const aliceOk = await alice.importDataJSON(JSON.stringify({
+    const alicePromise = alice.importDataJSON(JSON.stringify({
       version: 1,
       orphanedWorkingCopies: [{
         suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
         raw: JSON.stringify({ name: 'Alice recovery', lat: 1, lng: 1 }),
       }],
     }));
-    expect(bobPromise).toBeInstanceOf(Promise);
-    const bobOk = await bobPromise;
+    for (let i = 0; i < 50 && !aliceAtBarrier; i += 1) await Promise.resolve();
+    expect(aliceAtBarrier).toBe(true);
+    expect(typeof releaseAlice).toBe('function');
+    expect(locks.isHeld(LEGACY_MIGRATION_LOCK_NAME)).toBe(true);
+
+    const bobPromise = bob.importDataJSON(JSON.stringify({
+      version: 1,
+      orphanedWorkingCopies: [{
+        suffix: WORKING_COPY_KEYS.HOME_ADDRESS,
+        raw: JSON.stringify({ name: 'Bob recovery', lat: 2, lng: 2 }),
+      }],
+    }));
+    await Promise.resolve();
+    expect(locks.queuedCount(LEGACY_MIGRATION_LOCK_NAME)).toBeGreaterThanOrEqual(1);
+
+    releaseAlice();
+    const [aliceOk, bobOk] = await Promise.all([alicePromise, bobPromise]);
     expect({ aliceOk, bobOk }).toEqual({ aliceOk: true, bobOk: true });
     alice.setOwner(SESSION_A.user.id, { migrate: false });
     bob.setOwner(SESSION_B.user.id, { migrate: false });
@@ -1490,6 +1558,32 @@ describe('namespaced browser storage', () => {
       homeAddress: { name: 'After', lat: 2, lng: 2 },
     }))).toBe(false);
     expect(snapshotStorage()).toEqual(before);
+  });
+
+  test('failed import rollback is scoped to keys this import mutates', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    localStorage.setItem('unrelated_keep', 'stay');
+    const beforeHome = localStorage.getItem(
+      authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+    const inner = globalThis.localStorage;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        if (String(key).includes('saved_places')) throw storageError();
+        store.setItem(key, value);
+      },
+    });
+    expect(await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'After place' })],
+    }))).toBe(false);
+    globalThis.localStorage = inner;
+    expect(inner.getItem('unrelated_keep')).toBe('stay');
+    expect(inner.getItem(
+      authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
+    )).toBe(beforeHome);
   });
 
   test('failed import restores byte-identical storage', async () => {

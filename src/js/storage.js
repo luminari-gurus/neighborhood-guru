@@ -456,9 +456,9 @@ function writeUniqueOrphanEnvelope(suffix, envelope) {
     if (readItem(candidate) != null) continue;
     migrationInterleave('after-orphan-overflow-absent-read', { suffix, candidate });
     if (readItem(candidate) != null) continue;
-    if (writeItemVerified(candidate, envelope)) return true;
+    if (writeItemVerified(candidate, envelope)) return candidate;
   }
-  return false;
+  return null;
 }
 
 function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId) {
@@ -471,12 +471,12 @@ function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId)
   });
   const existingNow = readItem(primary);
   if (existingNow == null) {
-    if (!writeItemVerified(primary, envelope)) return false;
-    return true;
+    if (!writeItemVerified(primary, envelope)) return null;
+    return primary;
   }
   const existingParsed = parseOrphanEnvelope(existingNow);
   if (existingParsed.raw === incomingRaw && existingParsed.namespaceId === incomingNamespaceId) {
-    return true;
+    return primary;
   }
   return writeUniqueOrphanEnvelope(suffix, envelope);
 }
@@ -493,40 +493,77 @@ async function commitImportedOrphan(orphan, envelope, namespaceId) {
   if (existingNow != null) {
     const existingParsed = parseOrphanEnvelope(existingNow);
     if (existingParsed.raw === orphan.raw && existingParsed.namespaceId === namespaceId) {
-      return;
+      return preferred;
     }
-    if (!writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId)) {
-      throw new Error('orphan-write-failed');
-    }
-    return;
+    const written = writeOrphanEnvelope(orphan.suffix, envelope, orphan.raw, namespaceId);
+    if (!written) throw new Error('orphan-write-failed');
+    return written;
   }
   // Two tabs can both observe the preferred key absent. localStorage cannot
   // CAS, so never share that slot: mint a unique key inside this transaction.
-  if (!writeUniqueOrphanEnvelope(orphan.suffix, envelope)) {
-    throw new Error('orphan-write-failed');
-  }
+  const written = writeUniqueOrphanEnvelope(orphan.suffix, envelope);
+  if (!written) throw new Error('orphan-write-failed');
+  return written;
 }
 
 function quarantineLegacyValue(suffix, value, namespaceId = null) {
   const envelope = wrapOrphanEnvelope(suffix, value, namespaceId);
-  return writeOrphanEnvelope(suffix, envelope, value, namespaceId ?? null);
+  return writeOrphanEnvelope(suffix, envelope, value, namespaceId ?? null) != null;
 }
 
 function deviceQuarantineLegacyValue(suffix, value) {
   return quarantineLegacyValue(suffix, value, null);
 }
 
+function leftoverExists() {
+  return Object.values(LEGACY_WORKING_COPY_KEYS).some((legacyKey) => readItem(legacyKey) != null);
+}
+
+function leftoverClaimIsForeign(inspected, namespaceId) {
+  return inspected.kind === 'valid' && inspected.claim.namespaceId !== namespaceId;
+}
+
+function leftoverClaimCompletedForOwner(inspected, namespaceId) {
+  if (inspected.kind !== 'valid' || inspected.claim.namespaceId !== namespaceId) return false;
+  const status = claimStatus(inspected.claim);
+  return status === 'migrated' || status === 'orphaned';
+}
+
 /**
- * True when leftover exists for a suffix whose destination is still empty.
- * After exclusive copy the unprefixed key is retained, but dest is populated
- * so demos may seed and the recovery banner should not nag restore.
+ * Pending leftover this owner still needs to restore, dismiss, or quarantine.
+ * Dest occupancy does not clear this: a write into an empty namespace must not
+ * hide or abandon leftover. Foreign-claimed leftovers are not unapplied here.
+ * Completed own claims (migrated/orphaned) already applied or quarantined the
+ * leftover; the retained unprefixed key is provenance only.
  */
 function leftoverUnappliedForOwner(anonymous, ownerId) {
+  const namespaceId = namespaceIdFor(anonymous, ownerId);
   for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
     const leftover = readItem(legacyKey);
     if (leftover == null) continue;
-    const dest = readItem(namespaceKey(anonymous, ownerId, suffix));
-    if (dest == null) return true;
+    const inspected = inspectMigrationClaim(suffix);
+    if (leftoverClaimIsForeign(inspected, namespaceId)) continue;
+    if (leftoverClaimCompletedForOwner(inspected, namespaceId)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Leftover this owner may still copy into the active namespace (Restore).
+ * Invalid claims fail closed — recoverable via download, not adoption.
+ */
+function leftoverAdoptableForOwner(anonymous, ownerId) {
+  const namespaceId = namespaceIdFor(anonymous, ownerId);
+  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+    const leftover = readItem(legacyKey);
+    if (leftover == null) continue;
+    const inspected = inspectMigrationClaim(suffix);
+    if (inspected.kind === 'absent') return true;
+    if (inspected.kind === 'valid' && inspected.claim.namespaceId === namespaceId) {
+      const status = claimStatus(inspected.claim);
+      if (status === 'pending' || status === '') return true;
+    }
   }
   return false;
 }
@@ -547,7 +584,6 @@ function retainLegacyIfClaimHeld(legacyKey, expected, suffix, namespaceId, nonce
 }
 
 let exclusiveMigrationDepth = 0;
-let mutationLockDepth = 0;
 
 function runFailClosedLegacyMigration(_anonymous, _ownerId) {
   // Unlocked / synchronous path: never copy into a namespace, never delete
@@ -675,8 +711,8 @@ export async function withLegacyMigrationWebLock(fn) {
   return { lockUnavailable: true };
 }
 
-async function withMutationWebLock(fn) {
-  if (mutationLockDepth > 0 || exclusiveMigrationDepth > 0) {
+async function withMutationWebLock(service, fn) {
+  if ((service._mutationLockDepth || 0) > 0 || exclusiveMigrationDepth > 0) {
     return await Promise.resolve(fn());
   }
   if (!webMigrationLocksAvailable()) {
@@ -685,11 +721,11 @@ async function withMutationWebLock(fn) {
     throw error;
   }
   const result = await withLegacyMigrationWebLock(async () => {
-    mutationLockDepth += 1;
+    service._mutationLockDepth = (service._mutationLockDepth || 0) + 1;
     try {
       return await Promise.resolve(fn());
     } finally {
-      mutationLockDepth -= 1;
+      service._mutationLockDepth -= 1;
     }
   });
   if (result && (result.lockRejected || result.lockUnavailable)) {
@@ -700,24 +736,13 @@ async function withMutationWebLock(fn) {
   return result;
 }
 
-function snapshotAllStorage() {
+function snapshotStorageSubset(keys) {
   const snap = {};
-  for (const key of listStorageKeys()) {
-    snap[key] = readItem(key);
-  }
+  for (const key of keys) snap[key] = readItem(key);
   return snap;
 }
 
-function restoreAllStorage(snap) {
-  for (const key of listStorageKeys()) {
-    if (!Object.prototype.hasOwnProperty.call(snap, key)) {
-      try {
-        removeItem(key);
-      } catch {
-        // Best-effort rollback.
-      }
-    }
-  }
+function restoreStorageSubset(snap, writtenKeys = []) {
   for (const [key, value] of Object.entries(snap)) {
     try {
       if (value == null) removeItem(key);
@@ -726,13 +751,23 @@ function restoreAllStorage(snap) {
       // Best-effort rollback.
     }
   }
+  for (const key of writtenKeys) {
+    if (Object.prototype.hasOwnProperty.call(snap, key)) continue;
+    try {
+      removeItem(key);
+    } catch {
+      // Best-effort rollback.
+    }
+  }
 }
 
-function storageMatchesSnapshot(snap) {
-  const now = snapshotAllStorage();
-  const keys = new Set([...Object.keys(now), ...Object.keys(snap)]);
-  for (const key of keys) {
-    if (now[key] !== snap[key]) return false;
+function storageMatchesSnapshot(snap, writtenKeys = []) {
+  for (const [key, value] of Object.entries(snap)) {
+    if (readItem(key) !== value) return false;
+  }
+  for (const key of writtenKeys) {
+    if (Object.prototype.hasOwnProperty.call(snap, key)) continue;
+    if (readItem(key) != null) return false;
   }
   return true;
 }
@@ -767,11 +802,12 @@ function leftoverPreview(suffix, raw) {
   };
 }
 
-function listUnprefixedLeftovers() {
+function listUnprefixedLeftovers(namespaceId = null) {
   return Object.entries(LEGACY_WORKING_COPY_KEYS).map(([suffix, legacyKey]) => {
     const raw = readItem(legacyKey);
     if (raw == null) return null;
     const inspected = inspectMigrationClaim(suffix);
+    if (namespaceId && leftoverClaimIsForeign(inspected, namespaceId)) return null;
     return {
       key: legacyKey,
       suffix,
@@ -868,6 +904,8 @@ function readWorkingCopy(anonymous, ownerId, suffix) {
 
 function writeWorkingCopy(anonymous, ownerId, suffix, value) {
   migrateLegacyWorkingCopy(anonymous, ownerId);
+  // Dest occupancy does not clear leftoverUnapplied. Pending leftover stays
+  // until removed, quarantined, or a completed own claim.
   writeItem(namespaceKey(anonymous, ownerId, suffix), value);
 }
 
@@ -879,6 +917,7 @@ function removeWorkingCopy(anonymous, ownerId, suffix) {
 export const StorageService = {
   _ownerId: ANONYMOUS_OWNER_ID,
   _anonymous: true,
+  _mutationLockDepth: 0,
 
   getOwnerId() {
     return this._anonymous ? ANONYMOUS_OWNER_ID : this._ownerId;
@@ -936,15 +975,15 @@ export const StorageService = {
   },
 
   listPendingLegacyWorkingCopies() {
-    return listUnprefixedLeftovers();
+    return listUnprefixedLeftovers(this.getNamespaceId());
   },
 
   legacyMigrationStatus() {
-    const leftovers = listUnprefixedLeftovers();
-    const leftoverUnapplied = leftoverUnappliedForOwner(this._anonymous, this._ownerId);
+    const leftovers = this.listPendingLegacyWorkingCopies();
     return {
-      leftoverPresent: leftovers.length > 0,
-      leftoverUnapplied,
+      leftoverPresent: leftoverExists(),
+      leftoverUnapplied: leftoverUnappliedForOwner(this._anonymous, this._ownerId),
+      leftoverAdoptable: leftoverAdoptableForOwner(this._anonymous, this._ownerId),
       locksAvailable: webMigrationLocksAvailable(),
       leftovers,
       ownerOrphans: this.listOrphanedWorkingCopies(),
@@ -1019,6 +1058,8 @@ export const StorageService = {
   getSavedPlaces() {
     const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
     if (!raw) {
+      // Seed-block while leftover is still pending for this owner. Dest writes
+      // elsewhere must not hide leftover by occupying this key.
       if (leftoverUnappliedForOwner(this._anonymous, this._ownerId)) return [];
       const seeded = clonePlaces(DEMO_PLACES);
       writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
@@ -1264,6 +1305,12 @@ export const StorageService = {
     }, null, 2);
   },
 
+  /**
+   * Import neighborhood JSON into the current namespace. Single-tab: working-copy
+   * writers (savePlace / setHomeAddress / …) do not take this mutation lock, so
+   * concurrent same-key writes from another tab are not CAS-protected. Rollback
+   * snapshots only keys this import mutates so unrelated storage is left intact.
+   */
   async importDataJSON(jsonStr) {
     let data;
     try {
@@ -1309,21 +1356,36 @@ export const StorageService = {
     }
 
     try {
-      return await withMutationWebLock(async () => {
-        const snapshot = snapshotAllStorage();
+      return await withMutationWebLock(this, async () => {
+        const namespaceId = this.getNamespaceId();
+        const mutatingKeys = [];
+        if (data.homeAddress) {
+          mutatingKeys.push(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS));
+        }
+        if (Array.isArray(data.savedPlaces)) {
+          mutatingKeys.push(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES));
+        }
+        for (const orphan of preparedOrphans) {
+          mutatingKeys.push(orphan.preferredKey);
+        }
+        const snapshot = snapshotStorageSubset(mutatingKeys);
+        const writtenKeys = [];
         try {
-          const namespaceId = this.getNamespaceId();
           if (data.homeAddress) {
+            const key = namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS);
             const raw = JSON.stringify(data.homeAddress);
-            if (!writeItemVerified(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.HOME_ADDRESS), raw)) {
+            if (!writeItemVerified(key, raw)) {
               throw new Error('home-write-failed');
             }
+            writtenKeys.push(key);
           }
           if (Array.isArray(data.savedPlaces)) {
+            const key = namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
             const raw = JSON.stringify(data.savedPlaces);
-            if (!writeItemVerified(namespaceKey(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES), raw)) {
+            if (!writeItemVerified(key, raw)) {
               throw new Error('places-write-failed');
             }
+            writtenKeys.push(key);
           }
           for (const orphan of preparedOrphans) {
             const envelope = wrapOrphanEnvelope(
@@ -1332,11 +1394,15 @@ export const StorageService = {
               namespaceId,
               orphan.recoveredFrom,
             );
-            await commitImportedOrphan(orphan, envelope, namespaceId);
+            const written = await commitImportedOrphan(orphan, envelope, namespaceId);
+            if (written) writtenKeys.push(written);
           }
           return true;
         } catch (e) {
-          restoreAllStorage(snapshot);
+          restoreStorageSubset(snapshot, writtenKeys);
+          if (!storageMatchesSnapshot(snapshot, writtenKeys)) {
+            console.error('Failed to roll back neighborhood import');
+          }
           return false;
         }
       });
@@ -1354,5 +1420,6 @@ export function createStorageService() {
   const service = Object.create(StorageService);
   service._ownerId = ANONYMOUS_OWNER_ID;
   service._anonymous = true;
+  service._mutationLockDepth = 0;
   return service;
 }

@@ -1042,6 +1042,9 @@ export class UIController {
     const restoreBtn = this.elements.restoreLegacyBtn;
     if (!banner) return;
     const leftoverUnapplied = Boolean(status.leftoverUnapplied);
+    const leftoverAdoptable = status.leftoverAdoptable == null
+      ? leftoverUnapplied
+      : Boolean(status.leftoverAdoptable);
     const ownerOrphans = Array.isArray(status.ownerOrphans) ? status.ownerOrphans.length : 0;
     const deviceOrphans = Array.isArray(status.deviceOrphans) ? status.deviceOrphans.length : 0;
     const needsAttention = leftoverUnapplied || ownerOrphans > 0 || deviceOrphans > 0;
@@ -1051,10 +1054,12 @@ export class UIController {
     }
     banner.classList.remove('hidden');
     const parts = [];
-    if (leftoverUnapplied && !status.locksAvailable) {
+    if (leftoverAdoptable && !status.locksAvailable) {
       parts.push('Previous neighborhood data is still on this device and was not applied automatically (this browser cannot take a Web Lock).');
-    } else if (leftoverUnapplied) {
+    } else if (leftoverAdoptable) {
       parts.push('Previous neighborhood data is still on this device. Restore it into this account or download a recovery file.');
+    } else if (leftoverUnapplied) {
+      parts.push('Previous neighborhood data is still on this device and cannot be restored into this account. Download a recovery file.');
     }
     if (ownerOrphans > 0) {
       parts.push(`${ownerOrphans} leftover record(s) belong to this account.`);
@@ -1064,8 +1069,8 @@ export class UIController {
     }
     if (message) message.textContent = parts.join(' ');
     if (restoreBtn) {
-      restoreBtn.classList.toggle('hidden', !leftoverUnapplied);
-      restoreBtn.disabled = leftoverUnapplied && !status.locksAvailable;
+      restoreBtn.classList.toggle('hidden', !leftoverAdoptable);
+      restoreBtn.disabled = leftoverAdoptable && !status.locksAvailable;
     }
   }
 
