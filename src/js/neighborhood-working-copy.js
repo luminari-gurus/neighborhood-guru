@@ -26,16 +26,21 @@ export function ownerIdFromAuthState(state) {
  * Login / session restore only switch the local working copy. This function
  * must not call NeighborhoodStore or `/api/neighborhood` — login is not
  * consent (ADR 0001).
+ *
+ * Returns an unsubscribe function with a `.ready` promise that settles after
+ * the current owner's Web Lock migration (or fail-closed recovery).
  */
 export function bindNeighborhoodWorkingCopy(
   auth,
   storage = StorageService,
-  { onOwnerChange, neighborhoodStore } = {},
+  { onOwnerChange, onOwnerReady, neighborhoodStore } = {},
 ) {
   // Reserved so callers/tests can pass a store spy. Must stay unused here.
   void neighborhoodStore;
 
   let currentNamespaceId = storage.getNamespaceId?.() ?? storage.getOwnerId();
+  let applyGeneration = 0;
+  let latestReady = Promise.resolve();
 
   const apply = (state) => {
     const nextOwnerId = ownerIdFromAuthState(state);
@@ -56,20 +61,30 @@ export function bindNeighborhoodWorkingCopy(
       }
     }
 
-    try {
-      if (typeof storage.ensureLegacyMigrated === 'function') {
-        storage.ensureLegacyMigrated();
-      } else {
-        storage.setOwner(nextOwnerId);
+    const token = ++applyGeneration;
+    const migrate = typeof storage.ensureLegacyMigratedAsync === 'function'
+      ? storage.ensureLegacyMigratedAsync()
+      : Promise.resolve();
+    latestReady = Promise.resolve(migrate).then(() => {
+      if (token !== applyGeneration) return namespaceId;
+      try {
+        onOwnerReady?.(storage.getOwnerId());
+      } catch {
+        // Destination is already migrated. Listener failures stay isolated.
       }
-    } catch {
-      // Presentation was already cleared when the owner flipped. A storage
-      // exception must not skip that clear or keep the previous view mounted.
-    }
+      return namespaceId;
+    }).catch(() => namespaceId);
     return namespaceId;
   };
 
   apply(auth.getState());
   const unsubscribe = auth.subscribe(apply);
-  return () => unsubscribe();
+  const stop = () => unsubscribe();
+  Object.defineProperty(stop, 'ready', {
+    configurable: true,
+    get() {
+      return latestReady;
+    },
+  });
+  return stop;
 }

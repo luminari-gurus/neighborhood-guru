@@ -92,9 +92,6 @@ export class MapboxService {
       this._onMapLoad = () => {
         if (this.tornDown || !this.map) return;
         this.setup3DFeatures();
-        if (hasHome) {
-          this.renderHomeMarker(homeAddress);
-        }
         if (typeof options.onLoad === 'function') options.onLoad();
       };
       this.bindMapEvent('load', this._onMapLoad);

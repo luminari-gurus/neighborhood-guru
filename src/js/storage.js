@@ -329,15 +329,33 @@ function claimStillHeld(suffix, nonce, namespaceId) {
     && inspected.claim.namespaceId === namespaceId;
 }
 
-function claimOutcomeFromInspection(inspected, namespaceId) {
+function claimStatus(claim) {
+  return typeof claim?.status === 'string' ? claim.status : '';
+}
+
+function isPendingMatchingClaim(claim, namespaceId, fingerprint) {
+  return Boolean(claim)
+    && claim.namespaceId === namespaceId
+    && claimStatus(claim) === 'pending'
+    && matchesCopiedValue(claim.fingerprint, fingerprint);
+}
+
+function claimOutcomeFromInspection(inspected, namespaceId, fingerprint) {
   if (inspected.kind === 'invalid') return { ok: false, reason: 'invalid' };
   if (inspected.kind === 'valid' && inspected.claim.namespaceId !== namespaceId) {
     return { ok: false, reason: 'foreign', claim: inspected.claim };
   }
   if (inspected.kind === 'valid') {
+    if (!isPendingMatchingClaim(inspected.claim, namespaceId, fingerprint)) {
+      return { ok: false, reason: claimStatus(inspected.claim) === 'pending' ? 'fingerprint-mismatch' : 'completed', claim: inspected.claim };
+    }
     return { ok: true, nonce: inspected.claim.nonce, existing: true, claim: inspected.claim };
   }
   return null;
+}
+
+export function webMigrationLocksAvailable() {
+  return typeof globalThis.navigator?.locks?.request === 'function';
 }
 
 /**
@@ -347,12 +365,12 @@ function claimOutcomeFromInspection(inspected, namespaceId) {
  */
 function tryAcquireClaim(suffix, namespaceId, fingerprint) {
   const before = inspectMigrationClaim(suffix);
-  const early = claimOutcomeFromInspection(before, namespaceId);
+  const early = claimOutcomeFromInspection(before, namespaceId, fingerprint);
   if (early) return early;
 
   migrationInterleave('after-absent-claim-read', { suffix, namespaceId });
   const afterRead = inspectMigrationClaim(suffix);
-  const afterReadOutcome = claimOutcomeFromInspection(afterRead, namespaceId);
+  const afterReadOutcome = claimOutcomeFromInspection(afterRead, namespaceId, fingerprint);
   if (afterReadOutcome) return afterReadOutcome;
 
   const nonce = mintNonce();
@@ -365,7 +383,7 @@ function tryAcquireClaim(suffix, namespaceId, fingerprint) {
   };
   migrationInterleave('before-claim-write', { suffix, namespaceId, nonce });
   const preWrite = inspectMigrationClaim(suffix);
-  const preWriteOutcome = claimOutcomeFromInspection(preWrite, namespaceId);
+  const preWriteOutcome = claimOutcomeFromInspection(preWrite, namespaceId, fingerprint);
   if (preWriteOutcome) return preWriteOutcome;
   if (preWrite.kind !== 'absent') return { ok: false, reason: 'invalid' };
   writeMigrationClaim(suffix, claim);
@@ -421,8 +439,7 @@ function parseOrphanEnvelope(stored) {
  * Move a leftover off the adoptable unprefixed key. The envelope stamps the
  * claiming namespace so another account cannot preview/restore it.
  */
-function quarantineLegacyValue(suffix, value, namespaceId = null) {
-  const envelope = wrapOrphanEnvelope(suffix, value, namespaceId);
+function writeOrphanEnvelope(suffix, envelope, incomingRaw, incomingNamespaceId) {
   const primary = orphanedWorkingCopyKey(suffix);
   const existing = readItem(primary);
   if (existing == null) {
@@ -430,15 +447,29 @@ function quarantineLegacyValue(suffix, value, namespaceId = null) {
     return readItem(primary) === envelope;
   }
   const existingParsed = parseOrphanEnvelope(existing);
-  if (existingParsed.raw === value && (existingParsed.namespaceId === namespaceId || existingParsed.namespaceId == null)) {
+  if (existingParsed.raw === incomingRaw && existingParsed.namespaceId === incomingNamespaceId) {
     return true;
   }
-  const overflow = orphanedWorkingCopyKey(
-    suffix,
-    `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-  );
-  writeItem(overflow, envelope);
-  return readItem(overflow) === envelope;
+  for (let i = 0; i < 24; i += 1) {
+    const candidate = orphanedWorkingCopyKey(suffix, `${mintNonce()}-${i}`);
+    if (readItem(candidate) != null) continue;
+    writeItem(candidate, envelope);
+    if (readItem(candidate) === envelope) return true;
+  }
+  return false;
+}
+
+function quarantineLegacyValue(suffix, value, namespaceId = null) {
+  const envelope = wrapOrphanEnvelope(suffix, value, namespaceId);
+  return writeOrphanEnvelope(suffix, envelope, value, namespaceId ?? null);
+}
+
+function deviceQuarantineLegacyValue(suffix, value) {
+  return quarantineLegacyValue(suffix, value, null);
+}
+
+function unprefixedLeftoverPresent() {
+  return Object.values(LEGACY_WORKING_COPY_KEYS).some((legacyKey) => readItem(legacyKey) != null);
 }
 
 /**
@@ -469,55 +500,41 @@ function removeLegacyIfUnchanged(legacyKey, expected, suffix, namespaceId, nonce
   return false;
 }
 
-function withLegacyMigrationLock(fn) {
-  const lockKey = 'neighborhood_guru:legacy-migrate-lock';
-  const token = mintNonce();
-  const now = Date.now();
-  let held = false;
-  try {
-    const existing = parseJsonOr(readItem(lockKey), null);
-    if (existing && typeof existing.token === 'string' && typeof existing.expires === 'number' && existing.expires > now) {
-      // Another tab holds the sync fallback lock. Still run: nonce CAS is
-      // the exclusive claim. Prefer `ensureLegacyMigratedAsync` (Web Locks)
-      // when the caller can await.
-    } else {
-      writeItem(lockKey, JSON.stringify({ token, expires: now + 5000 }));
-      const confirm = parseJsonOr(readItem(lockKey), null);
-      held = confirm?.token === token;
-    }
-  } catch {
-    return fn();
-  }
-  try {
-    return fn();
-  } finally {
-    if (held) {
-      try {
-        const current = parseJsonOr(readItem(lockKey), null);
-        if (current?.token === token) removeItem(lockKey);
-      } catch {
-        // Lock expiry is best-effort.
-      }
-    }
-  }
-}
+let exclusiveMigrationDepth = 0;
 
-export async function withLegacyMigrationWebLock(fn) {
-  const locks = globalThis.navigator?.locks;
-  if (locks && typeof locks.request === 'function') {
-    return locks.request(LEGACY_MIGRATION_LOCK_NAME, { mode: 'exclusive' }, () => fn());
-  }
-  return withLegacyMigrationLock(fn);
-}
-
-/**
- * One-time local bootstrap of unprefixed keys into the namespace that first
- * claims them. Later owners never adopt a leftover bound to another claim,
- * an invalid claim, or a completed migration. Local only — never an upload.
- */
-function migrateLegacyWorkingCopy(anonymous, ownerId) {
+function runFailClosedLegacyMigration(anonymous, ownerId) {
   const namespaceId = namespaceIdFor(anonymous, ownerId);
-  withLegacyMigrationLock(() => {
+  const locksAvailable = webMigrationLocksAvailable();
+  for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
+    try {
+      const leftover = readItem(legacyKey);
+      if (leftover == null) continue;
+      const inspected = inspectMigrationClaim(suffix);
+      if (inspected.kind === 'invalid') continue;
+      if (inspected.kind === 'valid' && inspected.claim.namespaceId !== namespaceId) continue;
+      if (inspected.kind === 'valid' && isPendingMatchingClaim(inspected.claim, namespaceId, leftover)) continue;
+
+      const completedOrMismatched = inspected.kind === 'valid';
+      const absentWithoutLocks = inspected.kind === 'absent' && !locksAvailable;
+      if (!completedOrMismatched && !absentWithoutLocks) continue;
+
+      if (!deviceQuarantineLegacyValue(suffix, leftover)) continue;
+      if (!matchesCopiedValue(readItem(legacyKey), leftover)) continue;
+      try {
+        removeItem(legacyKey);
+      } catch {
+        // Leftover stays until exclusive recovery or a later fail-closed pass.
+      }
+    } catch {
+      // Fail closed: never copy into the active namespace without a Web Lock.
+    }
+  }
+}
+
+function runExclusiveLegacyMigration(anonymous, ownerId) {
+  const namespaceId = namespaceIdFor(anonymous, ownerId);
+  exclusiveMigrationDepth += 1;
+  try {
     for (const [suffix, legacyKey] of Object.entries(LEGACY_WORKING_COPY_KEYS)) {
       try {
         const copied = readItem(legacyKey);
@@ -535,8 +552,30 @@ function migrateLegacyWorkingCopy(anonymous, ownerId) {
           continue;
         }
 
+        if (inspected.kind === 'valid' && !isPendingMatchingClaim(inspected.claim, namespaceId, copied)) {
+          if (deviceQuarantineLegacyValue(suffix, copied) && matchesCopiedValue(readItem(legacyKey), copied)) {
+            try {
+              removeItem(legacyKey);
+            } catch {
+              // Claim remains completed; leftover is no longer adoptable once quarantined.
+            }
+          }
+          continue;
+        }
+
         const acquired = tryAcquireClaim(suffix, namespaceId, copied);
-        if (!acquired.ok) continue;
+        if (!acquired.ok) {
+          if (acquired.reason === 'completed' || acquired.reason === 'fingerprint-mismatch') {
+            if (deviceQuarantineLegacyValue(suffix, copied) && matchesCopiedValue(readItem(legacyKey), copied)) {
+              try {
+                removeItem(legacyKey);
+              } catch {
+                // Keep leftover if quarantine/remove failed.
+              }
+            }
+          }
+          continue;
+        }
 
         const { nonce } = acquired;
         migrationInterleave('before-copy', { suffix, namespaceId, nonce });
@@ -548,6 +587,14 @@ function migrateLegacyWorkingCopy(anonymous, ownerId) {
           continue;
         }
         if (!claimStillHeld(suffix, nonce, namespaceId)) continue;
+
+        if (!matchesCopiedValue(sourceNow, copied)) {
+          if (deviceQuarantineLegacyValue(suffix, sourceNow)
+            && removeLegacyIfUnchanged(legacyKey, sourceNow, suffix, namespaceId, nonce)) {
+            updateHeldClaim(suffix, nonce, namespaceId, { status: 'orphaned', fingerprint: copied });
+          }
+          continue;
+        }
 
         const destKey = namespaceKey(anonymous, ownerId, suffix);
         const dest = readItem(destKey);
@@ -578,7 +625,29 @@ function migrateLegacyWorkingCopy(anonymous, ownerId) {
         // Claim, if held, still binds this leftover. Other namespaces must not adopt.
       }
     }
-  });
+  } finally {
+    exclusiveMigrationDepth -= 1;
+  }
+}
+
+/**
+ * One-time local bootstrap of unprefixed keys. Exclusive adoption runs only
+ * while holding `navigator.locks`. The synchronous path never copies into the
+ * active namespace; without Web Locks it fail-closes into device-level recovery.
+ */
+function migrateLegacyWorkingCopy(anonymous, ownerId) {
+  if (exclusiveMigrationDepth > 0) {
+    return;
+  }
+  runFailClosedLegacyMigration(anonymous, ownerId);
+}
+
+export async function withLegacyMigrationWebLock(fn) {
+  const locks = globalThis.navigator?.locks;
+  if (locks && typeof locks.request === 'function') {
+    return locks.request(LEGACY_MIGRATION_LOCK_NAME, { mode: 'exclusive' }, () => fn());
+  }
+  return fn();
 }
 
 function orphanSuffixFromKey(key) {
@@ -705,27 +774,31 @@ export const StorageService = {
       this._ownerId = ownerId;
     }
     if (migrate) {
-      migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+      runFailClosedLegacyMigration(this._anonymous, this._ownerId);
     }
     return this.getOwnerId();
   },
 
   ensureLegacyMigrated() {
-    migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
+    runFailClosedLegacyMigration(this._anonymous, this._ownerId);
   },
 
   async ensureLegacyMigratedAsync() {
-    await withLegacyMigrationWebLock(() => {
-      migrateLegacyWorkingCopy(this._anonymous, this._ownerId);
-    });
+    if (webMigrationLocksAvailable()) {
+      await withLegacyMigrationWebLock(() => {
+        runExclusiveLegacyMigration(this._anonymous, this._ownerId);
+      });
+      return;
+    }
+    runFailClosedLegacyMigration(this._anonymous, this._ownerId);
   },
 
   migrateLegacyForOwner(ownerId) {
     if (ownerId == null || ownerId === ANONYMOUS_OWNER_ID || (typeof ownerId === 'string' && ownerId.trim().length === 0)) {
-      migrateLegacyWorkingCopy(true, ANONYMOUS_OWNER_ID);
+      runExclusiveLegacyMigration(true, ANONYMOUS_OWNER_ID);
       return;
     }
-    migrateLegacyWorkingCopy(false, ownerId);
+    runExclusiveLegacyMigration(false, ownerId);
   },
 
   workingCopyKey(suffix) {
@@ -778,6 +851,7 @@ export const StorageService = {
   getSavedPlaces() {
     const raw = readWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES);
     if (!raw) {
+      if (unprefixedLeftoverPresent()) return [];
       const seeded = clonePlaces(DEMO_PLACES);
       writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(seeded));
       return seeded;
@@ -945,8 +1019,8 @@ export const StorageService = {
       const stored = isOrphanedWorkingCopyKey(key) ? readItem(key) : null;
       if (stored == null) return { ok: false, reason: 'not-found', preview: null };
       const record = decodeOrphanedRecord(key, stored);
-      if (record.deviceLevel) return { ok: false, reason: 'device-level', preview: record };
-      return { ok: false, reason: 'wrong-owner', preview: record };
+      if (record.deviceLevel) return { ok: false, reason: 'device-level', preview: null };
+      return { ok: false, reason: 'wrong-owner', preview: null };
     }
 
     if (!preview.valid) {
@@ -1003,9 +1077,22 @@ export const StorageService = {
       homeAddress: this.getHomeAddress(),
       savedPlaces: this.getSavedPlaces(),
       orphanedWorkingCopies: this.listOrphanedWorkingCopies(),
-      deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
     };
     return JSON.stringify(backup, null, 2);
+  },
+
+  /**
+   * Explicit device-level recovery. Ambiguous historical leftovers are not
+   * attached to the active account; callers must show provenance warnings.
+   */
+  exportDeviceRecoveryJSON() {
+    return JSON.stringify({
+      version: 1,
+      kind: 'device-recovery',
+      exportedAt: new Date().toISOString(),
+      warning: 'These records are not bound to the signed-in account. Review before restoring.',
+      deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
+    }, null, 2);
   },
 
   importDataJSON(jsonStr) {
@@ -1015,26 +1102,38 @@ export const StorageService = {
       if (Array.isArray(data.savedPlaces)) {
         writeWorkingCopy(this._anonymous, this._ownerId, WORKING_COPY_KEYS.SAVED_PLACES, JSON.stringify(data.savedPlaces));
       }
-      const importOrphans = (orphans, deviceLevel) => {
-        if (!Array.isArray(orphans)) return;
-        for (const orphan of orphans) {
-          if (!orphan || typeof orphan.key !== 'string' || !isOrphanedWorkingCopyKey(orphan.key)) continue;
-          let raw = null;
-          if (typeof orphan.raw === 'string') {
-            raw = orphan.raw;
-          } else if (orphan.homeAddress && typeof orphan.homeAddress === 'object' && !Array.isArray(orphan.homeAddress)) {
-            raw = JSON.stringify(orphan.homeAddress);
-          } else if (Array.isArray(orphan.savedPlaces)) {
-            raw = JSON.stringify(orphan.savedPlaces);
-          }
-          if (raw == null) continue;
-          const namespaceId = deviceLevel ? null : (typeof orphan.namespaceId === 'string' ? orphan.namespaceId : this.getNamespaceId());
-          const suffix = typeof orphan.suffix === 'string' ? orphan.suffix : orphanSuffixFromKey(orphan.key).suffix;
-          writeItem(orphan.key, wrapOrphanEnvelope(suffix, raw, namespaceId, orphan.recoveredFrom || 'legacy-conflict'));
+      const namespaceId = this.getNamespaceId();
+      const orphans = Array.isArray(data.orphanedWorkingCopies) ? data.orphanedWorkingCopies : [];
+      for (const orphan of orphans) {
+        if (!orphan || typeof orphan !== 'object') continue;
+        let raw = null;
+        if (typeof orphan.raw === 'string') {
+          raw = orphan.raw;
+        } else if (orphan.homeAddress && typeof orphan.homeAddress === 'object' && !Array.isArray(orphan.homeAddress)) {
+          raw = JSON.stringify(orphan.homeAddress);
+        } else if (Array.isArray(orphan.savedPlaces)) {
+          raw = JSON.stringify(orphan.savedPlaces);
         }
-      };
-      importOrphans(data.orphanedWorkingCopies, false);
-      importOrphans(data.deviceOrphanedWorkingCopies, true);
+        if (raw == null) continue;
+        const suffix = typeof orphan.suffix === 'string'
+          ? orphan.suffix
+          : (typeof orphan.key === 'string' && isOrphanedWorkingCopyKey(orphan.key)
+            ? orphanSuffixFromKey(orphan.key).suffix
+            : null);
+        if (!suffix) continue;
+        const envelope = wrapOrphanEnvelope(suffix, raw, namespaceId, orphan.recoveredFrom || 'legacy-conflict');
+        const preferredKey = typeof orphan.key === 'string' && isOrphanedWorkingCopyKey(orphan.key)
+          ? orphan.key
+          : orphanedWorkingCopyKey(suffix);
+        const existing = readItem(preferredKey);
+        if (existing == null) {
+          writeItem(preferredKey, envelope);
+          continue;
+        }
+        const existingParsed = parseOrphanEnvelope(existing);
+        if (existingParsed.raw === raw && existingParsed.namespaceId === namespaceId) continue;
+        writeOrphanEnvelope(suffix, envelope, raw, namespaceId);
+      }
       return true;
     } catch (e) {
       console.error('Failed to parse import JSON', e);

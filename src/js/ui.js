@@ -6,6 +6,50 @@ export class UIController {
     this.elements = {};
     this.currentFilter = 'all';
     this.searchQuery = '';
+    this.disposed = false;
+    this.listeners = [];
+    this.timeouts = [];
+  }
+
+  listen(target, type, handler) {
+    if (this.disposed || !target || typeof target.addEventListener !== 'function') return;
+    const wrapped = (...args) => {
+      if (this.disposed) return;
+      handler(...args);
+    };
+    target.addEventListener(type, wrapped);
+    this.listeners.push({ target, type, handler: wrapped });
+  }
+
+  scheduleTimeout(fn, delayMs) {
+    if (this.disposed) return null;
+    const id = setTimeout(() => {
+      this.timeouts = this.timeouts.filter((entry) => entry !== id);
+      if (this.disposed) return;
+      fn();
+    }, delayMs);
+    this.timeouts.push(id);
+    return id;
+  }
+
+  dispose() {
+    this.disposed = true;
+    for (const { target, type, handler } of this.listeners) {
+      try {
+        target.removeEventListener(type, handler);
+      } catch {
+        // Node may already be gone.
+      }
+    }
+    this.listeners = [];
+    for (const id of this.timeouts) {
+      try {
+        clearTimeout(id);
+      } catch {
+        // Timer may already have fired.
+      }
+    }
+    this.timeouts = [];
   }
 
   init() {
@@ -15,7 +59,7 @@ export class UIController {
     this.bindEventFieldEvents();
 
     if (this.elements.formCategory) {
-      this.elements.formCategory.addEventListener('change', () => {
+      this.listen(this.elements.formCategory, 'change', () => {
         this.updateCategoryFields(this.elements.formCategory.value);
       });
     }
@@ -333,7 +377,7 @@ export class UIController {
    */
   bindPeopleFieldEvents() {
     if (this.elements.addPersonFieldBtn) {
-      this.elements.addPersonFieldBtn.addEventListener('click', () => {
+      this.listen(this.elements.addPersonFieldBtn, 'click', () => {
         this.addPersonRow('');
       });
     }
@@ -385,7 +429,7 @@ export class UIController {
    */
   bindContactFieldEvents() {
     if (this.elements.addContactFieldBtn) {
-      this.elements.addContactFieldBtn.addEventListener('click', () => {
+      this.listen(this.elements.addContactFieldBtn, 'click', () => {
         this.addContactRow('phone_mobile', '', '');
       });
     }
@@ -461,7 +505,7 @@ export class UIController {
    */
   bindEventFieldEvents() {
     if (this.elements.addEventFieldBtn) {
-      this.elements.addEventFieldBtn.addEventListener('click', () => {
+      this.listen(this.elements.addEventFieldBtn, 'click', () => {
         this.addEventRow({ title: '', day: 'friday', time: '' });
       });
     }
@@ -914,10 +958,10 @@ export class UIController {
     toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
     container.appendChild(toast);
 
-    setTimeout(() => {
+    this.scheduleTimeout(() => {
       toast.style.opacity = '0';
       toast.style.transition = 'opacity 0.3s ease';
-      setTimeout(() => toast.remove(), 300);
+      this.scheduleTimeout(() => toast.remove(), 300);
     }, durationMs);
   }
 

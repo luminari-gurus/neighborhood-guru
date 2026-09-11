@@ -5,6 +5,7 @@ import { JamBaseService } from '../src/js/jambase-service.js';
 import { OverpassService } from '../src/js/overpass-service.js';
 import { bindNeighborhoodWorkingCopy } from '../src/js/neighborhood-working-copy.js';
 import { NeighborhoodGuruApp } from '../src/main.js';
+import { UIController } from '../src/js/ui.js';
 import {
   StorageService,
   WORKING_COPY_KEYS,
@@ -190,11 +191,17 @@ async function createBoundApp({ ui, mapboxService, session = SESSION_A } = {}) {
   app.unsubscribeWorkingCopy = bindNeighborhoodWorkingCopy(auth, StorageService, {
     onOwnerChange: () => {
       if (app.viewReady && !app.disposed) {
-        app.syncNeighborhoodViewFromStorage({ ownerChanged: true });
+        app.clearOwnerScopedPresentation();
+      }
+    },
+    onOwnerReady: () => {
+      if (app.viewReady && !app.disposed) {
+        app.syncNeighborhoodViewFromStorage();
       }
     },
   });
   app.viewReady = true;
+  await app.unsubscribeWorkingCopy.ready;
   app.syncNeighborhoodViewFromStorage();
   return { app, auth, client };
 }
@@ -445,7 +452,12 @@ describe('owner-switch presentation isolation', () => {
       onOwnerChange: (ownerId) => {
         ownerChanges.push(ownerId);
         if (app.viewReady && !app.disposed) {
-          app.syncNeighborhoodViewFromStorage({ ownerChanged: true });
+          app.clearOwnerScopedPresentation();
+        }
+      },
+      onOwnerReady: () => {
+        if (app.viewReady && !app.disposed) {
+          app.syncNeighborhoodViewFromStorage();
         }
       },
     });
@@ -811,5 +823,70 @@ describe('owner-switch presentation isolation', () => {
     expect(map.handlers.filter((entry) => entry.type === 'load')).toHaveLength(0);
     map.handlers.forEach((entry) => entry.fn());
     expect(renders).toBe(0);
+  });
+
+  test('late map load renders the current owner home not a captured previous home', async () => {
+    const homes = [];
+    const mapboxService = createStubMapbox();
+    mapboxService.renderHomeMarker = (home) => {
+      homes.push(home?.name ?? null);
+    };
+    mapboxService.map = { loaded: true };
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress({ name: 'Alice home', lat: 1, lng: 1 });
+    const ui = createStubUi();
+    const { app, auth } = await createBoundApp({ ui, mapboxService, session: SESSION_A });
+    expect(app.homeAddress.name).toBe('Alice home');
+
+    await auth.signIn({ session: SESSION_B });
+    await app.unsubscribeWorkingCopy.ready;
+    expect(app.homeAddress).toBeNull();
+    homes.length = 0;
+    app.renderNeighborhoodView();
+    expect(homes).toEqual([]);
+    app.dispose();
+  });
+
+  test('older address search cannot replace a newer map-click marker', async () => {
+    const resolvers = [];
+    const mapboxService = createStubMapbox({
+      geocode: () => new Promise((resolve) => {
+        resolvers.push(resolve);
+      }),
+    });
+    const ui = createStubUi();
+    StorageService.setOwner(SESSION_A.user.id);
+    const { app } = await createBoundApp({ ui, mapboxService, session: SESSION_A });
+    ui.elements.addressSearchInput.value = 'older';
+    const search = app.handleAddressSearch();
+    const click = app.onMapClicked({ lat: 9, lng: 9 });
+    resolvers[1]({ name: 'click', lat: 9, lng: 9 });
+    await click;
+    resolvers[0]({ name: 'older', lat: 1, lng: 1 });
+    await search;
+    expect(mapboxService.lastMarker).toEqual({ lat: 9, lng: 9 });
+    app.dispose();
+  });
+
+  test('UIController.dispose removes listeners and clears timeouts', async () => {
+    const ui = new UIController();
+    let clicks = 0;
+    let timed = 0;
+    const target = {
+      addEventListener(type, handler) {
+        this.handler = handler;
+      },
+      removeEventListener() {
+        this.removed = true;
+      },
+    };
+    ui.listen(target, 'click', () => { clicks += 1; });
+    ui.scheduleTimeout(() => { timed += 1; }, 20);
+    ui.dispose();
+    target.handler?.();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(clicks).toBe(0);
+    expect(timed).toBe(0);
+    expect(target.removed).toBe(true);
   });
 });

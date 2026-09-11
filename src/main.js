@@ -42,12 +42,12 @@ export class NeighborhoodGuruApp {
     this.neighborhoodGeneration = 0;
     this.poiDiscoveryGeneration = -1;
     this.poiSearchGeneration = 0;
-    this.addressSearchGeneration = 0;
+    this.locationSelectionGeneration = 0;
     this.editorNamespaceId = null;
     this.editorRevision = 0;
     this.eventAbort = new AbortController();
     this.domListeners = [];
-    this.mapClickGeneration = 0;
+    this.timeouts = [];
     this.jambaseSearchGeneration = 0;
   }
 
@@ -67,10 +67,19 @@ export class NeighborhoodGuruApp {
     this.unsubscribeWorkingCopy = bindNeighborhoodWorkingCopy(this.auth, this.storage, {
       onOwnerChange: () => {
         if (this.viewReady && !this.disposed) {
-          this.syncNeighborhoodViewFromStorage({ ownerChanged: true });
+          this.clearOwnerScopedPresentation();
+        }
+      },
+      onOwnerReady: () => {
+        if (this.viewReady && !this.disposed) {
+          this.syncNeighborhoodViewFromStorage();
         }
       },
     });
+    if (this.unsubscribeWorkingCopy?.ready) {
+      await this.unsubscribeWorkingCopy.ready;
+    }
+    if (this.disposed) return;
 
     // 1. Initialize UI Controller & cache elements
     this.ui.init();
@@ -110,10 +119,7 @@ export class NeighborhoodGuruApp {
           onMapClick: (coords) => this.onMapClicked(coords),
           onLoad: () => {
             if (this.disposed || this.mapboxService.tornDown) return;
-            this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => {
-              if (this.disposed || this.mapboxService.tornDown) return;
-              this.openLocationEditor(place);
-            });
+            this.renderNeighborhoodView();
           },
           onTokenError: () => {
             this.ui.updateKeyWarningState(false);
@@ -126,7 +132,8 @@ export class NeighborhoodGuruApp {
         this.ui.updateKeyWarningState(false);
       }
     } else {
-      setTimeout(() => {
+      this.scheduleTimeout(() => {
+        if (this.disposed) return;
         this.ui.openKeyPromptModal(token);
       }, 300);
       this.ui.showToast('Mapbox Access Token required. Provide a key to enable map features!', 'error');
@@ -165,7 +172,7 @@ export class NeighborhoodGuruApp {
     this.poiDiscoveryGeneration = -1;
     this.bumpEditorRevision();
     this.editorNamespaceId = null;
-    this.mapClickGeneration += 1;
+    this.locationSelectionGeneration += 1;
     this.jambaseSearchGeneration += 1;
     try {
       this.ui.resetOwnerScopedPresentation?.();
@@ -259,12 +266,22 @@ export class NeighborhoodGuruApp {
     this.domListeners.push({ target, type, handler: wrapped });
   }
 
+  scheduleTimeout(fn, delayMs) {
+    if (this.disposed) return null;
+    const id = setTimeout(() => {
+      this.timeouts = this.timeouts.filter((entry) => entry !== id);
+      if (this.disposed) return;
+      fn();
+    }, delayMs);
+    this.timeouts.push(id);
+    return id;
+  }
+
   dispose() {
     this.disposed = true;
     this.neighborhoodGeneration += 1;
     this.poiSearchGeneration += 1;
-    this.addressSearchGeneration += 1;
-    this.mapClickGeneration += 1;
+    this.locationSelectionGeneration += 1;
     this.jambaseSearchGeneration += 1;
     this.bumpEditorRevision();
     this.editorNamespaceId = null;
@@ -273,6 +290,14 @@ export class NeighborhoodGuruApp {
     } catch {
       // Already aborted.
     }
+    for (const id of this.timeouts) {
+      try {
+        clearTimeout(id);
+      } catch {
+        // Timer may already have fired.
+      }
+    }
+    this.timeouts = [];
     for (const { target, type, handler } of this.domListeners) {
       try {
         target.removeEventListener(type, handler);
@@ -282,6 +307,7 @@ export class NeighborhoodGuruApp {
     }
     this.domListeners = [];
     this.mapboxService.teardownMap?.();
+    this.ui.dispose?.();
     if (this.sunAnimationTimer) {
       clearInterval(this.sunAnimationTimer);
       this.sunAnimationTimer = null;
@@ -305,6 +331,7 @@ export class NeighborhoodGuruApp {
 
     const handleAddLocationClick = async () => {
       const generation = this.neighborhoodGeneration;
+      const operationId = ++this.locationSelectionGeneration;
       const mapCenter = this.mapboxService.map ? this.mapboxService.map.getCenter() : { lat: 37.7749, lng: -122.4194 };
       const coords = this.mapboxService.currentTempCoords || {
         lat: mapCenter.lat,
@@ -320,7 +347,7 @@ export class NeighborhoodGuruApp {
         console.warn('Reverse geocoding failed', e);
       }
 
-      if (!this.isCurrentGeneration(generation)) return;
+      if (!this.isCurrentGeneration(generation) || operationId !== this.locationSelectionGeneration) return;
       this.openLocationEditor({
         id: undefined,
         lat: coords.lat,
@@ -363,8 +390,7 @@ export class NeighborhoodGuruApp {
       this.mapboxService.setStyle(style);
       
       // Re-render markers after style swap
-      setTimeout(() => {
-        if (this.disposed) return;
+      this.scheduleTimeout(() => {
         this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
         if (this.homeAddress) this.mapboxService.renderHomeMarker(this.homeAddress);
       }, 500);
@@ -451,7 +477,7 @@ export class NeighborhoodGuruApp {
       JamBaseService.resetApiFallbackNotification();
       this.ui.closeSettingsModal();
       this.ui.showToast('Settings saved. Reloading map...', 'success');
-      setTimeout(() => window.location.reload(), 1000);
+      this.scheduleTimeout(() => window.location.reload(), 1000);
     });
 
     this.listen(el.clearHomeBtn, 'click', () => {
@@ -491,7 +517,7 @@ export class NeighborhoodGuruApp {
       this.ui.closeKeyPromptModal();
       this.ui.updateKeyWarningState(true);
       this.ui.showToast('Mapbox key saved! Reloading map...', 'success');
-      setTimeout(() => window.location.reload(), 800);
+      this.scheduleTimeout(() => window.location.reload(), 800);
     });
 
     // --- Backup Export & Import ---
@@ -530,7 +556,7 @@ export class NeighborhoodGuruApp {
         const success = this.storage.importDataJSON(event.target.result);
         if (success) {
           this.ui.showToast('Data imported successfully! Reloading...', 'success');
-          setTimeout(() => window.location.reload(), 1000);
+          this.scheduleTimeout(() => window.location.reload(), 1000);
         } else {
           this.ui.showToast('Failed to import JSON file. Invalid format.', 'error');
         }
@@ -799,7 +825,7 @@ export class NeighborhoodGuruApp {
   async onMapClicked(coords) {
     if (this.disposed) return;
     const generation = this.neighborhoodGeneration;
-    const operationId = ++this.mapClickGeneration;
+    const operationId = ++this.locationSelectionGeneration;
     let placeName = '';
     
     try {
@@ -809,7 +835,7 @@ export class NeighborhoodGuruApp {
       console.warn('Reverse geocoding failed', e);
     }
 
-    if (!this.isCurrentGeneration(generation) || operationId !== this.mapClickGeneration) return;
+    if (!this.isCurrentGeneration(generation) || operationId !== this.locationSelectionGeneration) return;
 
     const locationData = {
       lat: coords.lat,
@@ -818,7 +844,7 @@ export class NeighborhoodGuruApp {
     };
 
     this.mapboxService.showTempMarker(coords, () => {
-      if (!this.isCurrentGeneration(generation) || operationId !== this.mapClickGeneration) return;
+      if (!this.isCurrentGeneration(generation) || operationId !== this.locationSelectionGeneration) return;
       this.openLocationEditor(locationData);
     });
 
@@ -833,18 +859,18 @@ export class NeighborhoodGuruApp {
     const query = this.ui.elements.addressSearchInput.value.trim();
     if (!query) return;
     const generation = this.neighborhoodGeneration;
-    const operationId = ++this.addressSearchGeneration;
+    const operationId = ++this.locationSelectionGeneration;
 
     this.ui.showToast(`Searching for "${query}"...`, 'info');
     const result = await this.mapboxService.geocodeAddress(query);
-    if (!this.isCurrentGeneration(generation) || operationId !== this.addressSearchGeneration) return;
+    if (!this.isCurrentGeneration(generation) || operationId !== this.locationSelectionGeneration) return;
 
     if (result) {
       const coords = { lat: result.lat, lng: result.lng };
       this.mapboxService.flyToLocation(result.lat, result.lng, 16.5);
       
       this.mapboxService.showTempMarker(coords, () => {
-        if (!this.isCurrentGeneration(generation) || operationId !== this.addressSearchGeneration) return;
+        if (!this.isCurrentGeneration(generation) || operationId !== this.locationSelectionGeneration) return;
         this.openLocationEditor({
           lat: result.lat,
           lng: result.lng,
