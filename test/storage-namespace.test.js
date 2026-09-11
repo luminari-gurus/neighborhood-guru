@@ -511,7 +511,7 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(StorageService.workingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES))).toBe('{not-json');
   });
 
-  test('identical leftover legacy keys are removed after migration', async () => {
+  test('identical leftover legacy keys are retained after migration', async () => {
     const home = { name: 'Same', lat: 1, lng: 2 };
     StorageService.setOwner(null);
     StorageService.setHomeAddress(home);
@@ -1745,6 +1745,53 @@ describe('working-copy bind and login I/O', () => {
     expect(StorageService.getNamespaceId()).toBe(`user:${SESSION_B.user.id}`);
     expect(owners).toContain(SESSION_B.user.id);
 
+    auth.dispose();
+  });
+
+  test('rejected Web Lock still notifies owner ready once and preserves leftover', async () => {
+    globalThis.navigator = {
+      ...(globalThis.navigator || {}),
+      locks: {
+        request() {
+          return Promise.reject(new Error('lock denied'));
+        },
+      },
+    };
+    localStorage.setItem(
+      LEGACY_WORKING_COPY_KEYS.home_address,
+      JSON.stringify({ name: 'lock rejected leftover', lat: 1, lng: 1 }),
+    );
+    const readyOwners = [];
+    const client = new FakeAuthClient({ session: SESSION_A });
+    const auth = createAuthState(client);
+    await auth.initialize();
+    const unsub = bindNeighborhoodWorkingCopy(auth, StorageService, {
+      onOwnerReady: (owner) => readyOwners.push(owner),
+    });
+    await unsub.ready;
+    expect(readyOwners).toEqual([SESSION_A.user.id]);
+    expect(StorageService.getHomeAddress()?.name).not.toBe('lock rejected leftover');
+    expect(localStorage.getItem(LEGACY_WORKING_COPY_KEYS.home_address)).toBeString();
+    expect(StorageService.legacyMigrationStatus().leftoverPresent).toBe(true);
+    unsub();
+    auth.dispose();
+  });
+
+  test('waitUntilIdle follows A to B to A to the final owner', async () => {
+    const readyOwners = [];
+    const client = new FakeAuthClient({ session: SESSION_A });
+    const auth = createAuthState(client);
+    await auth.initialize();
+    const unsub = bindNeighborhoodWorkingCopy(auth, StorageService, {
+      onOwnerReady: (owner) => readyOwners.push(owner),
+    });
+    const idle = unsub.ready;
+    await auth.signIn({ session: SESSION_B });
+    await auth.signIn({ session: SESSION_A });
+    await idle;
+    expect(StorageService.getOwnerId()).toBe(SESSION_A.user.id);
+    expect(readyOwners.at(-1)).toBe(SESSION_A.user.id);
+    unsub();
     auth.dispose();
   });
 });
