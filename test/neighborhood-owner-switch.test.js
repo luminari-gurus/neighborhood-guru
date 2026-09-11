@@ -243,6 +243,8 @@ async function createBoundApp({ ui, mapboxService, session = SESSION_A } = {}) {
 }
 
 describe('owner-switch presentation isolation', () => {
+  const originalNavigator = globalThis.navigator;
+
   beforeEach(() => {
     globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);
@@ -256,6 +258,7 @@ describe('owner-switch presentation isolation', () => {
     globalThis.localStorage = createMemoryLocalStorage();
     StorageService.setOwner(null);
     globalThis.localStorage = originalLocalStorage;
+    globalThis.navigator = originalNavigator;
     JamBaseService.searchVenues = originalSearchVenues;
     JamBaseService.fetchVenueDetails = originalFetchVenueDetails;
     OverpassService.fetchNearbyPois = originalFetchNearbyPois;
@@ -1381,6 +1384,61 @@ describe('owner-switch presentation isolation', () => {
     }
   });
 
+  test('older sidebar JamBase load does not overwrite a newer refresh', async () => {
+    const ui = new UIController();
+    const deferred = [];
+    const originalFetchShows = JamBaseService.fetchUpcomingShows;
+    JamBaseService.fetchUpcomingShows = () => new Promise((resolve) => { deferred.push(resolve); });
+    const listEl = { innerHTML: '', dataset: {}, isConnected: true };
+    const box = {
+      dataset: { jambaseId: 'venue-1' },
+      querySelector(selector) {
+        return String(selector).includes('jb-card-shows-list') ? listEl : this;
+      },
+      closest() { return this; },
+    };
+    const list = {
+      innerHTML: '',
+      handler: null,
+      addEventListener(_type, handler) { this.handler = handler; },
+      removeEventListener() {},
+      appendChild() {},
+      querySelectorAll() { return [box]; },
+    };
+    ui.elements.savedPlacesList = list;
+    ui.elements.placesCountBadge = { textContent: '' };
+    ui.bindDelegatedEvents();
+    const previousDocument = globalThis.document;
+    globalThis.document = {
+      createElement() {
+        return { className: '', dataset: {}, style: {}, innerHTML: '' };
+      },
+    };
+    try {
+      ui.renderPlacesList([{ ...PLACE_A, jambaseId: 'venue-1' }]);
+      expect(deferred).toHaveLength(1);
+      list.handler?.({
+        stopPropagation() {},
+        target: {
+          closest(selector) {
+            if (selector === '.card-refresh-jb-btn') return { closest: () => box };
+            return null;
+          },
+        },
+      });
+      expect(deferred).toHaveLength(2);
+      deferred[1]([{ title: 'NEW', date: 'Fri', isToday: false, url: 'https://example.test/new' }]);
+      await Promise.resolve();
+      deferred[0]([{ title: 'OLD', date: 'Thu', isToday: false, url: 'https://example.test/old' }]);
+      await Promise.resolve();
+      expect(listEl.innerHTML).toContain('NEW');
+      expect(listEl.innerHTML).not.toContain('OLD');
+    } finally {
+      globalThis.document = previousDocument;
+      JamBaseService.fetchUpcomingShows = originalFetchShows;
+    }
+  });
+
   test('duplicate place cards keep distinct delegated edit targets', () => {
     const ui = new UIController();
     const opened = [];
@@ -1489,6 +1547,45 @@ describe('owner-switch presentation isolation', () => {
     expect(ui.elements.legacyOwnerOrphanList.innerHTML).toContain('Alice orphan');
     expect(ui.elements.legacyOwnerOrphanList.innerHTML).toContain('data-orphan-action="merge"');
     expect(ui.elements.exportDeviceRecoveryBtn.classList.hidden).toBe(true);
+  });
+
+  test('lock-unavailable import is not reported as invalid format', async () => {
+    const ui = createStubUi();
+    let changeHandler = null;
+    ui.elements.importFileInput = {
+      addEventListener(type, handler) {
+        if (type === 'change') changeHandler = handler;
+      },
+      removeEventListener() {},
+    };
+    const originalFileReader = globalThis.FileReader;
+    globalThis.FileReader = class FakeFileReader {
+      readAsText() {
+        queueMicrotask(() => {
+          this.onload?.({
+            target: {
+              result: JSON.stringify({
+                version: 1,
+                homeAddress: { name: 'Valid backup', lat: 1, lng: 1 },
+              }),
+            },
+          });
+        });
+      }
+    };
+    try {
+      const { app } = await createBoundApp({ ui, session: SESSION_A });
+      app.storage.importDataJSON = async () => ({ ok: false, reason: 'lock-unavailable' });
+      app.bindEvents();
+      expect(changeHandler).toBeTypeOf('function');
+      changeHandler({ target: { files: [{ name: 'backup.json' }] } });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(ui.toasts.some((message) => String(message).includes('Invalid format'))).toBe(false);
+      expect(ui.toasts.some((message) => String(message).toLowerCase().includes('lock'))).toBe(true);
+    } finally {
+      globalThis.FileReader = originalFileReader;
+    }
   });
 
   test('rejected leftover restore shows an actionable toast and keeps recovery visible', async () => {
