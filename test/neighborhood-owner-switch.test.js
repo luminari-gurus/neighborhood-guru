@@ -82,6 +82,7 @@ function createStubUi() {
     jambasePickerSubtitle: { textContent: '' },
     jambaseStatusMsg: { textContent: '' },
     poiStatusSubtitle: { textContent: '' },
+    addressSearchInput: { value: '' },
     locationForm: {
       reset() {
         values.formLocationId = '';
@@ -147,10 +148,22 @@ function createStubMapbox({ geocode } = {}) {
     map: null,
     homeMarker: null,
     currentTempCoords: { lat: 37.77, lng: -122.41 },
+    lastFly: null,
+    lastMarker: null,
+    markerOrder: [],
     clearTempMarker() { this.currentTempCoords = null; },
     renderSavedMarkers() {},
     renderHomeMarker() {},
-    showTempMarker() {},
+    showTempMarker(coords) {
+      this.currentTempCoords = coords;
+      this.lastMarker = coords;
+      this.markerOrder.push(coords);
+    },
+    flyToLocation(lat, lng) {
+      this.lastFly = { lat, lng };
+    },
+    flyToHome() {},
+    flyToGlobe() {},
     async geocodeAddress(query) {
       if (geocode) return geocode(query);
       return { name: 'Geocoded', lat: 1, lng: 1 };
@@ -514,5 +527,184 @@ describe('owner-switch presentation isolation', () => {
     app.dispose();
     expect(app.sunAnimationTimer).toBeNull();
     expect(JamBaseService._onApiFallback).toBeNull();
+  });
+
+  test('JamBase results from editor A do not populate editor B in the same account', async () => {
+    let resolveSearch;
+    const searchPromise = new Promise((resolve) => {
+      resolveSearch = resolve;
+    });
+    JamBaseService.searchVenues = async () => searchPromise;
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Editor A', lat: 1, lng: 1 });
+    ui.elements.formName.value = 'Editor A';
+    const editorARevision = app.editorRevision;
+
+    const searchDone = app.handleJambaseSearch();
+    app.openLocationEditor({ name: 'Editor B', lat: 2, lng: 2 });
+    ui.elements.formName.value = 'Editor B';
+    ui.elements.formJambaseId.value = '';
+    ui.elements.formCapacity.value = '';
+    resolveSearch([{ id: 'venue-a', name: 'Venue A', city: 'SF', state: 'CA', capacity: 100 }]);
+    await searchDone;
+
+    expect({
+      pickerOpens: ui.pickerOpens,
+      currentEditor: ui.elements.formName.value,
+      jambaseId: ui.elements.formJambaseId.value,
+      capacity: ui.elements.formCapacity.value,
+      editorGuardPassed: app.editorMatchesCurrentRequest(editorARevision),
+    }).toEqual({
+      pickerOpens: 0,
+      currentEditor: 'Editor B',
+      jambaseId: '',
+      capacity: '',
+      editorGuardPassed: false,
+    });
+
+    app.dispose();
+  });
+
+  test('JamBase selection from editor A does not mutate editor B after a same-account reopen', async () => {
+    JamBaseService.searchVenues = async () => [{ id: 'venue-a', name: 'Venue A' }];
+    let resolveDetails;
+    JamBaseService.fetchVenueDetails = () => new Promise((resolve) => {
+      resolveDetails = resolve;
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Editor A', lat: 1, lng: 1 });
+    ui.elements.formName.value = 'Editor A';
+    await app.handleJambaseSearch();
+    expect(ui.pickerOpens).toBe(1);
+    expect(typeof ui.jambaseOnSelect).toBe('function');
+
+    const selectPromise = ui.jambaseOnSelect({ id: 'venue-a', name: 'Venue A' });
+    app.openLocationEditor({ name: 'Editor B', lat: 2, lng: 2 });
+    ui.elements.formName.value = 'Editor B';
+    ui.elements.formJambaseId.value = '';
+    ui.elements.formCapacity.value = '';
+    resolveDetails({ capacity: 100 });
+    await selectPromise;
+
+    expect(ui.elements.formName.value).toBe('Editor B');
+    expect(ui.elements.formJambaseId.value).not.toBe('venue-a');
+    expect(ui.elements.formCapacity.value).not.toBe('100');
+    expect(ui.elements.formCapacity.value).not.toBe(100);
+
+    app.dispose();
+  });
+
+  test('dispose rejects saves and unregisters bindEvents listeners', async () => {
+    const ui = createStubUi();
+    const handlers = [];
+    const formValues = {
+      reset: ui.elements.locationForm.reset,
+      querySelector: () => null,
+    };
+    ui.elements.locationForm = {
+      ...formValues,
+      addEventListener(type, handler, options) {
+        handlers.push({ type, handler, signal: options?.signal });
+        options?.signal?.addEventListener('abort', () => {
+          const index = handlers.findIndex((entry) => entry.handler === handler);
+          if (index >= 0) handlers.splice(index, 1);
+        });
+      },
+      dispatch(type, event) {
+        for (const entry of [...handlers]) {
+          if (entry.type === type) entry.handler(event);
+        }
+      },
+    };
+
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({
+      id: PLACE_A.id,
+      name: PLACE_A.name,
+      notes: PLACE_A.notes,
+      lat: PLACE_A.lat,
+      lng: PLACE_A.lng,
+    });
+    app.bindEvents();
+    expect(handlers.some((entry) => entry.type === 'submit')).toBe(true);
+
+    let saveCalls = 0;
+    const originalSave = StorageService.savePlace.bind(StorageService);
+    StorageService.savePlace = (...args) => {
+      saveCalls += 1;
+      return originalSave(...args);
+    };
+
+    try {
+      app.dispose();
+      ui.elements.locationForm.dispatch('submit', { preventDefault() {} });
+      app.handleSaveLocation();
+      expect({ saveCallsAfterDispose: saveCalls }).toEqual({ saveCallsAfterDispose: 0 });
+      expect(handlers.some((entry) => entry.type === 'submit')).toBe(false);
+    } finally {
+      StorageService.savePlace = originalSave;
+    }
+  });
+
+  test('concurrent same-owner POI searches keep the newer result', async () => {
+    const resolvers = [];
+    OverpassService.fetchNearbyPois = () => new Promise((resolve) => {
+      resolvers.push(resolve);
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.setHomeAddress(HOME_A);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+
+    const first = app.handleDiscoverPois();
+    const second = app.handleDiscoverPois();
+    expect(resolvers.length).toBe(2);
+
+    resolvers[1]([{ name: 'newer cafe', typeLabel: 'Cafe', category: 'favorite', address: '', notes: '', color: '#3b82f6', lat: 2, lng: 2 }]);
+    await second;
+    resolvers[0]([{ name: 'older cafe', typeLabel: 'Cafe', category: 'favorite', address: '', notes: '', color: '#3b82f6', lat: 1, lng: 1 }]);
+    await first;
+
+    expect(app.currentDiscoveredPois.map((poi) => poi.name)).toEqual(['newer cafe']);
+    app.applyPoiFilter();
+    expect(ui.renderedPois.map((poi) => poi.name)).toEqual(['newer cafe']);
+
+    app.dispose();
+  });
+
+  test('concurrent same-owner address searches keep the newer marker', async () => {
+    const resolvers = [];
+    const mapboxService = createStubMapbox({
+      geocode: () => new Promise((resolve) => {
+        resolvers.push(resolve);
+      }),
+    });
+    const ui = createStubUi();
+    StorageService.setOwner(SESSION_A.user.id);
+    const { app } = await createBoundApp({ ui, mapboxService, session: SESSION_A });
+
+    ui.elements.addressSearchInput.value = 'one';
+    const first = app.handleAddressSearch();
+    ui.elements.addressSearchInput.value = 'two';
+    const second = app.handleAddressSearch();
+    expect(resolvers.length).toBe(2);
+
+    resolvers[1]({ name: 'two', lat: 2, lng: 2 });
+    await second;
+    resolvers[0]({ name: 'one', lat: 1, lng: 1 });
+    await first;
+
+    expect(mapboxService.lastMarker).toEqual({ lat: 2, lng: 2 });
+    expect(mapboxService.lastFly).toEqual({ lat: 2, lng: 2 });
+    expect(mapboxService.markerOrder.at(-1)).toEqual({ lat: 2, lng: 2 });
+
+    app.dispose();
   });
 });

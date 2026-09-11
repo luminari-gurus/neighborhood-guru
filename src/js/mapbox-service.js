@@ -23,6 +23,8 @@ export class MapboxService {
     this.currentToken = '';
     this.currentStyle = 'streets';
     this.is3DActive = true;
+    this._onMapClick = null;
+    this._onMapError = null;
   }
 
   /**
@@ -66,7 +68,7 @@ export class MapboxService {
       this.map = new mapboxgl.Map(mapOptions);
 
       // Listen for Mapbox token authorization errors or tile load failures
-      this.map.on('error', (e) => {
+      this._onMapError = (e) => {
         if (e && e.error) {
           const status = e.error.status;
           const msg = String(e.error.message || '');
@@ -75,7 +77,8 @@ export class MapboxService {
             if (onTokenError) onTokenError(e.error);
           }
         }
-      });
+      };
+      this.map.on('error', this._onMapError);
 
       // Add navigation controls
       this.map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'bottom-right');
@@ -91,14 +94,15 @@ export class MapboxService {
       });
 
       if (onMapClick) {
-        this.map.on('click', (e) => {
+        this._onMapClick = (e) => {
           if (e.originalEvent.target.closest('.mapboxgl-popup') || e.originalEvent.target.closest('.custom-map-marker')) {
             return;
           }
           const coords = { lat: e.lngLat.lat, lng: e.lngLat.lng };
           this.showTempMarker(coords);
           onMapClick(coords);
-        });
+        };
+        this.map.on('click', this._onMapClick);
       }
 
       return this.map;
@@ -107,6 +111,15 @@ export class MapboxService {
       if (onTokenError) onTokenError(err);
       return null;
     }
+  }
+
+  unbindMapListeners() {
+    if (this.map) {
+      if (this._onMapClick) this.map.off('click', this._onMapClick);
+      if (this._onMapError) this.map.off('error', this._onMapError);
+    }
+    this._onMapClick = null;
+    this._onMapError = null;
   }
 
   /**

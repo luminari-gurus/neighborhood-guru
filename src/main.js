@@ -41,7 +41,11 @@ export class NeighborhoodGuruApp {
     this.poiFilter = 'all';
     this.neighborhoodGeneration = 0;
     this.poiDiscoveryGeneration = -1;
+    this.poiSearchGeneration = 0;
+    this.addressSearchGeneration = 0;
     this.editorNamespaceId = null;
+    this.editorRevision = 0;
+    this.eventAbort = new AbortController();
   }
 
   async init() {
@@ -152,6 +156,7 @@ export class NeighborhoodGuruApp {
     this.savedPlaces = [];
     this.currentDiscoveredPois = [];
     this.poiDiscoveryGeneration = -1;
+    this.bumpEditorRevision();
     this.editorNamespaceId = null;
     try {
       this.ui.resetOwnerScopedPresentation?.();
@@ -194,8 +199,20 @@ export class NeighborhoodGuruApp {
   }
 
   openLocationEditor(place) {
+    this.bumpEditorRevision();
     this.editorNamespaceId = this.storage.getNamespaceId();
     this.ui.openLocationModal(place);
+  }
+
+  closeLocationEditor() {
+    this.bumpEditorRevision();
+    this.editorNamespaceId = null;
+    this.ui.closeLocationModal();
+  }
+
+  bumpEditorRevision() {
+    this.editorRevision += 1;
+    return this.editorRevision;
   }
 
   isCurrentGeneration(generation) {
@@ -210,9 +227,31 @@ export class NeighborhoodGuruApp {
     return this.editorNamespaceId != null && this.editorNamespaceId === this.storage.getNamespaceId();
   }
 
+  editorMatchesCurrentRequest(editorRevision) {
+    return !this.disposed
+      && this.editorMatchesCurrentOwner()
+      && editorRevision === this.editorRevision;
+  }
+
+  listen(target, type, handler) {
+    if (this.disposed) return;
+    if (!target || typeof target.addEventListener !== 'function') return;
+    target.addEventListener(type, handler, { signal: this.eventAbort.signal });
+  }
+
   dispose() {
     this.disposed = true;
     this.neighborhoodGeneration += 1;
+    this.poiSearchGeneration += 1;
+    this.addressSearchGeneration += 1;
+    this.bumpEditorRevision();
+    this.editorNamespaceId = null;
+    try {
+      this.eventAbort.abort();
+    } catch {
+      // Already aborted.
+    }
+    this.mapboxService.unbindMapListeners?.();
     if (this.sunAnimationTimer) {
       clearInterval(this.sunAnimationTimer);
       this.sunAnimationTimer = null;
@@ -229,8 +268,8 @@ export class NeighborhoodGuruApp {
     const el = this.ui.elements;
 
     // --- Search & Home Address Handlers ---
-    el.searchGoBtn.addEventListener('click', () => this.handleAddressSearch());
-    el.addressSearchInput.addEventListener('keydown', (e) => {
+    this.listen(el.searchGoBtn, 'click', () => this.handleAddressSearch());
+    this.listen(el.addressSearchInput, 'keydown', (e) => {
       if (e.key === 'Enter') this.handleAddressSearch();
     });
 
@@ -252,8 +291,6 @@ export class NeighborhoodGuruApp {
       }
 
       if (!this.isCurrentGeneration(generation)) return;
-
-      // Explicitly ensure id is undefined so a new unique location is created
       this.openLocationEditor({
         id: undefined,
         lat: coords.lat,
@@ -263,13 +300,13 @@ export class NeighborhoodGuruApp {
       });
     };
 
-    el.addLocationBtn.addEventListener('click', handleAddLocationClick);
-    if (el.sidebarAddBtn) el.sidebarAddBtn.addEventListener('click', handleAddLocationClick);
+    this.listen(el.addLocationBtn, 'click', handleAddLocationClick);
+    if (el.sidebarAddBtn) this.listen(el.sidebarAddBtn, 'click', handleAddLocationClick);
 
-    el.setHomeBtn.addEventListener('click', () => this.handleSetHomeAddress());
+    this.listen(el.setHomeBtn, 'click', () => this.handleSetHomeAddress());
 
     // --- Quick Navigation Buttons ---
-    el.flyHomeBtn.addEventListener('click', () => {
+    this.listen(el.flyHomeBtn, 'click', () => {
       if (this.homeAddress) {
         this.mapboxService.flyToHome(this.homeAddress);
         this.ui.showToast('Flying to Home address...', 'info');
@@ -278,13 +315,13 @@ export class NeighborhoodGuruApp {
       }
     });
 
-    el.flyGlobeBtn.addEventListener('click', () => {
+    this.listen(el.flyGlobeBtn, 'click', () => {
       this.mapboxService.flyToGlobe();
       this.ui.showToast('Flying out to 3D Earth Globe view...', 'info');
     });
 
     // --- Style Switcher Toggles (Streets vs Satellite) ---
-    el.styleSwitcher.addEventListener('click', (e) => {
+    this.listen(el.styleSwitcher, 'click', (e) => {
       const btn = e.target.closest('.style-btn');
       if (!btn) return;
 
@@ -297,6 +334,7 @@ export class NeighborhoodGuruApp {
       
       // Re-render markers after style swap
       setTimeout(() => {
+        if (this.disposed) return;
         this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
         if (this.homeAddress) this.mapboxService.renderHomeMarker(this.homeAddress);
       }, 500);
@@ -306,7 +344,7 @@ export class NeighborhoodGuruApp {
 
     // --- 3D Buildings & Terrain Toggle ---
     if (el.toggle3dBtn) {
-      el.toggle3dBtn.addEventListener('click', () => {
+      this.listen(el.toggle3dBtn, 'click', () => {
         const isNow3D = this.mapboxService.toggle3DMode();
         if (isNow3D) {
           el.toggle3dBtn.classList.add('active');
@@ -319,10 +357,10 @@ export class NeighborhoodGuruApp {
     }
 
     // --- Sidebar Drawer Controls & Filters ---
-    el.toggleSidebarBtn.addEventListener('click', () => this.ui.toggleSidebar());
-    el.closeSidebarBtn.addEventListener('click', () => this.ui.toggleSidebar(false));
+    this.listen(el.toggleSidebarBtn, 'click', () => this.ui.toggleSidebar());
+    this.listen(el.closeSidebarBtn, 'click', () => this.ui.toggleSidebar(false));
 
-    el.sidebarSearchInput.addEventListener('input', (e) => {
+    this.listen(el.sidebarSearchInput, 'input', (e) => {
       this.ui.searchQuery = e.target.value;
       this.ui.renderPlacesList(
         this.savedPlaces,
@@ -331,7 +369,7 @@ export class NeighborhoodGuruApp {
       );
     });
 
-    el.sidebarFilterPills.addEventListener('click', (e) => {
+    this.listen(el.sidebarFilterPills, 'click', (e) => {
       const pill = e.target.closest('.pill');
       if (!pill) return;
 
@@ -347,34 +385,34 @@ export class NeighborhoodGuruApp {
     });
 
     // --- Location Editor Modal Submit & Delete ---
-    el.locationForm.addEventListener('submit', (e) => {
+    this.listen(el.locationForm, 'submit', (e) => {
       e.preventDefault();
       this.handleSaveLocation();
     });
 
-    el.closeLocationModal.addEventListener('click', () => {
-      this.ui.closeLocationModal();
+    this.listen(el.closeLocationModal, 'click', () => {
+      this.closeLocationEditor();
       this.mapboxService.clearTempMarker();
     });
 
-    el.cancelLocationBtn.addEventListener('click', () => {
-      this.ui.closeLocationModal();
+    this.listen(el.cancelLocationBtn, 'click', () => {
+      this.closeLocationEditor();
       this.mapboxService.clearTempMarker();
     });
 
-    el.deleteLocationBtn.addEventListener('click', () => {
+    this.listen(el.deleteLocationBtn, 'click', () => {
       this.handleDeleteLocation();
     });
 
     // --- Settings Modal Handlers ---
-    el.openSettingsBtn.addEventListener('click', () => {
+    this.listen(el.openSettingsBtn, 'click', () => {
       this.ui.openSettingsModal(this.storage.getMapboxToken(), this.storage.getJambaseToken());
     });
 
-    el.closeSettingsModal.addEventListener('click', () => this.ui.closeSettingsModal());
-    el.cancelSettingsBtn.addEventListener('click', () => this.ui.closeSettingsModal());
+    this.listen(el.closeSettingsModal, 'click', () => this.ui.closeSettingsModal());
+    this.listen(el.cancelSettingsBtn, 'click', () => this.ui.closeSettingsModal());
 
-    el.saveSettingsBtn.addEventListener('click', () => {
+    this.listen(el.saveSettingsBtn, 'click', () => {
       const token = el.settingsMapboxToken ? el.settingsMapboxToken.value.trim() : '';
       const jbToken = el.settingsJambaseToken ? el.settingsJambaseToken.value.trim() : '';
       this.storage.setMapboxToken(token);
@@ -386,7 +424,8 @@ export class NeighborhoodGuruApp {
       setTimeout(() => window.location.reload(), 1000);
     });
 
-    el.clearHomeBtn.addEventListener('click', () => {
+    this.listen(el.clearHomeBtn, 'click', () => {
+      if (this.disposed) return;
       if (confirm('Clear configured Home address? App will revert to Earth Globe view.')) {
         this.storage.clearHomeAddress();
         this.homeAddress = null;
@@ -397,44 +436,36 @@ export class NeighborhoodGuruApp {
     });
 
     // --- Key Prompt Modal & Warning Banner Handlers ---
-    if (el.closeKeyPromptModal) {
-      el.closeKeyPromptModal.addEventListener('click', () => this.ui.closeKeyPromptModal());
-    }
+    this.listen(el.closeKeyPromptModal, 'click', () => this.ui.closeKeyPromptModal());
 
-    if (el.dismissKeyPromptBtn) {
-      el.dismissKeyPromptBtn.addEventListener('click', () => {
-        this.ui.closeKeyPromptModal();
-        this.ui.showToast('Exploring in demo mode. Click "Provide Mapbox Key" to enable map tiles.', 'info');
-      });
-    }
+    this.listen(el.dismissKeyPromptBtn, 'click', () => {
+      this.ui.closeKeyPromptModal();
+      this.ui.showToast('Exploring in demo mode. Click "Provide Mapbox Key" to enable map tiles.', 'info');
+    });
 
-    if (el.bannerOpenKeyModalBtn) {
-      el.bannerOpenKeyModalBtn.addEventListener('click', () => {
-        this.ui.openKeyPromptModal(this.storage.getMapboxToken());
-      });
-    }
+    this.listen(el.bannerOpenKeyModalBtn, 'click', () => {
+      this.ui.openKeyPromptModal(this.storage.getMapboxToken());
+    });
 
-    if (el.saveKeyPromptBtn) {
-      el.saveKeyPromptBtn.addEventListener('click', () => {
-        const token = el.promptMapboxToken ? el.promptMapboxToken.value.trim() : '';
-        if (!token) {
-          this.ui.showToast('Please enter a valid Mapbox Access Token.', 'error');
-          return;
-        }
-        if (!token.startsWith('pk.')) {
-          this.ui.showToast('Mapbox public tokens usually start with "pk." Please double check your key.', 'error');
-        }
+    this.listen(el.saveKeyPromptBtn, 'click', () => {
+      const token = el.promptMapboxToken ? el.promptMapboxToken.value.trim() : '';
+      if (!token) {
+        this.ui.showToast('Please enter a valid Mapbox Access Token.', 'error');
+        return;
+      }
+      if (!token.startsWith('pk.')) {
+        this.ui.showToast('Mapbox public tokens usually start with "pk." Please double check your key.', 'error');
+      }
 
-        this.storage.setMapboxToken(token);
-        this.ui.closeKeyPromptModal();
-        this.ui.updateKeyWarningState(true);
-        this.ui.showToast('Mapbox key saved! Reloading map...', 'success');
-        setTimeout(() => window.location.reload(), 800);
-      });
-    }
+      this.storage.setMapboxToken(token);
+      this.ui.closeKeyPromptModal();
+      this.ui.updateKeyWarningState(true);
+      this.ui.showToast('Mapbox key saved! Reloading map...', 'success');
+      setTimeout(() => window.location.reload(), 800);
+    });
 
     // --- Backup Export & Import ---
-    el.exportDataBtn.addEventListener('click', () => {
+    this.listen(el.exportDataBtn, 'click', () => {
       const jsonStr = this.storage.exportDataJSON();
       const blob = new Blob([jsonStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -443,10 +474,21 @@ export class NeighborhoodGuruApp {
       a.download = `neighborhood-guru-backup-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      this.ui.showToast('Neighborhood data exported successfully!', 'success');
+      let orphanCount = 0;
+      try {
+        orphanCount = JSON.parse(jsonStr).orphanedWorkingCopies?.length || 0;
+      } catch {
+        orphanCount = 0;
+      }
+      this.ui.showToast(
+        orphanCount > 0
+          ? `Neighborhood data exported, including ${orphanCount} leftover record(s) marked orphaned.`
+          : 'Neighborhood data exported successfully!',
+        'success',
+      );
     });
 
-    el.importFileInput.addEventListener('change', (e) => {
+    this.listen(el.importFileInput, 'change', (e) => {
       const file = e.target.files[0];
       if (!file) return;
 
@@ -454,7 +496,7 @@ export class NeighborhoodGuruApp {
       const namespaceId = this.storage.getNamespaceId();
       const reader = new FileReader();
       reader.onload = (event) => {
-        if (!this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
+        if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
         const success = this.storage.importDataJSON(event.target.result);
         if (success) {
           this.ui.showToast('Data imported successfully! Reloading...', 'success');
@@ -467,105 +509,87 @@ export class NeighborhoodGuruApp {
     });
 
     // --- Map Hint Dismiss ---
-    el.dismissHintBtn.addEventListener('click', () => {
-      el.mapHintBanner.style.display = 'none';
+    this.listen(el.dismissHintBtn, 'click', () => {
+      if (el.mapHintBanner) el.mapHintBanner.style.display = 'none';
     });
 
     // --- 3D Solar Light Controller & Weather Handlers ---
-    if (el.sunTimeSlider) {
-      el.sunTimeSlider.addEventListener('input', (e) => {
-        const hourVal = parseFloat(e.target.value);
-        el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(hourVal);
-        this.mapboxService.setSolarLighting(hourVal);
-      });
-    }
+    this.listen(el.sunTimeSlider, 'input', (e) => {
+      const hourVal = parseFloat(e.target.value);
+      el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(hourVal);
+      this.mapboxService.setSolarLighting(hourVal);
+    });
 
-    if (el.sunNowBtn) {
-      el.sunNowBtn.addEventListener('click', () => {
-        if (this.sunAnimationTimer) {
-          clearInterval(this.sunAnimationTimer);
-          this.sunAnimationTimer = null;
-          if (el.sunPlayBtn) el.sunPlayBtn.textContent = '▶ Play';
-        }
-        const now = new Date();
-        const currentHour = now.getHours() + now.getMinutes() / 60;
-        const clamped = Math.max(6, Math.min(21, currentHour));
-        el.sunTimeSlider.value = clamped;
-        el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(clamped);
-        this.mapboxService.setSolarLighting(clamped);
-      });
-    }
+    this.listen(el.sunNowBtn, 'click', () => {
+      if (this.sunAnimationTimer) {
+        clearInterval(this.sunAnimationTimer);
+        this.sunAnimationTimer = null;
+        if (el.sunPlayBtn) el.sunPlayBtn.textContent = '▶ Play';
+      }
+      const now = new Date();
+      const currentHour = now.getHours() + now.getMinutes() / 60;
+      const clamped = Math.max(6, Math.min(21, currentHour));
+      el.sunTimeSlider.value = clamped;
+      el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(clamped);
+      this.mapboxService.setSolarLighting(clamped);
+    });
 
-    if (el.sunPlayBtn) {
-      el.sunPlayBtn.addEventListener('click', () => {
-        if (this.sunAnimationTimer) {
-          clearInterval(this.sunAnimationTimer);
-          this.sunAnimationTimer = null;
-          el.sunPlayBtn.textContent = '▶ Play';
-        } else {
-          el.sunPlayBtn.textContent = '⏸ Pause';
-          this.sunAnimationTimer = setInterval(() => {
-            let current = parseFloat(el.sunTimeSlider.value) + 0.25;
-            if (current > 21) current = 6;
-            el.sunTimeSlider.value = current;
-            el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(current);
-            this.mapboxService.setSolarLighting(current);
-          }, 300);
-        }
-      });
-    }
+    this.listen(el.sunPlayBtn, 'click', () => {
+      if (this.sunAnimationTimer) {
+        clearInterval(this.sunAnimationTimer);
+        this.sunAnimationTimer = null;
+        el.sunPlayBtn.textContent = '▶ Play';
+      } else {
+        el.sunPlayBtn.textContent = '⏸ Pause';
+        this.sunAnimationTimer = setInterval(() => {
+          if (this.disposed) {
+            clearInterval(this.sunAnimationTimer);
+            this.sunAnimationTimer = null;
+            return;
+          }
+          let current = parseFloat(el.sunTimeSlider.value) + 0.25;
+          if (current > 21) current = 6;
+          el.sunTimeSlider.value = current;
+          el.sunTimeDisplay.textContent = this.ui.formatHourDisplay(current);
+          this.mapboxService.setSolarLighting(current);
+        }, 300);
+      }
+    });
 
     // --- OpenStreetMap POI Discovery Handlers ---
-    if (el.discoverPoiBtn) {
-      el.discoverPoiBtn.addEventListener('click', () => this.handleDiscoverPois());
-    }
-
-    if (el.closePoiModal) {
-      el.closePoiModal.addEventListener('click', () => this.ui.closePoiModal());
-    }
-
-    if (el.importAllPoisBtn) {
-      el.importAllPoisBtn.addEventListener('click', () => this.importAllPois());
-    }
-
-    if (el.poiCategoryPills) {
-      el.poiCategoryPills.addEventListener('click', (e) => {
-        const pill = e.target.closest('.pill');
-        if (!pill) return;
-        el.poiCategoryPills.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
-        pill.classList.add('active');
-        this.poiFilter = pill.dataset.poiFilter || 'all';
-        this.applyPoiFilter();
-      });
-    }
+    this.listen(el.discoverPoiBtn, 'click', () => this.handleDiscoverPois());
+    this.listen(el.closePoiModal, 'click', () => this.ui.closePoiModal());
+    this.listen(el.importAllPoisBtn, 'click', () => this.importAllPois());
+    this.listen(el.poiCategoryPills, 'click', (e) => {
+      const pill = e.target.closest('.pill');
+      if (!pill) return;
+      el.poiCategoryPills.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      this.poiFilter = pill.dataset.poiFilter || 'all';
+      this.applyPoiFilter();
+    });
 
     // --- JamBase Venue Search & Selection Handler ---
-    if (el.searchJambaseBtn) {
-      el.searchJambaseBtn.addEventListener('click', () => {
-        this.handleJambaseSearch();
-      });
-    }
+    this.listen(el.searchJambaseBtn, 'click', () => {
+      this.handleJambaseSearch();
+    });
 
-    if (el.formJambaseId) {
-      el.formJambaseId.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (el.searchJambaseBtn) {
-            el.searchJambaseBtn.click();
-          }
+    this.listen(el.formJambaseId, 'keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (el.searchJambaseBtn) {
+          el.searchJambaseBtn.click();
         }
-      });
-    }
+      }
+    });
 
-    if (el.closeJambasePickerModal) {
-      el.closeJambasePickerModal.addEventListener('click', () => this.ui.closeJambasePickerModal());
-    }
+    this.listen(el.closeJambasePickerModal, 'click', () => this.ui.closeJambasePickerModal());
 
     // --- Global Keyboard Event Handlers (ESC to close modals) ---
-    document.addEventListener('keydown', (e) => {
+    this.listen(typeof document !== 'undefined' ? document : null, 'keydown', (e) => {
       if (e.key === 'Escape' || e.key === 'Esc') {
         if (el.locationModal && !el.locationModal.classList.contains('hidden')) {
-          this.ui.closeLocationModal();
+          this.closeLocationEditor();
           this.mapboxService.clearTempMarker();
         }
         if (el.settingsModal && !el.settingsModal.classList.contains('hidden')) {
@@ -585,11 +609,10 @@ export class NeighborhoodGuruApp {
 
     // --- Modal Overlay Backdrop Click Handlers ---
     [el.locationModal, el.settingsModal, el.keyPromptModal, el.poiDiscoveryModal, el.jambasePickerModal].forEach((modal) => {
-      if (!modal) return;
-      modal.addEventListener('click', (e) => {
+      this.listen(modal, 'click', (e) => {
         if (e.target === modal) {
           if (modal === el.locationModal) {
-            this.ui.closeLocationModal();
+            this.closeLocationEditor();
             this.mapboxService.clearTempMarker();
           } else if (modal === el.settingsModal) {
             this.ui.closeSettingsModal();
@@ -609,7 +632,9 @@ export class NeighborhoodGuruApp {
    * Handle OpenStreetMap POI Discovery
    */
   async handleDiscoverPois() {
+    if (this.disposed) return;
     const generation = this.neighborhoodGeneration;
+    const operationId = ++this.poiSearchGeneration;
     let lat = 37.7749;
     let lng = -122.4194;
 
@@ -628,9 +653,9 @@ export class NeighborhoodGuruApp {
     }
 
     const pois = await OverpassService.fetchNearbyPois(lat, lng, 1500);
-    if (!this.isCurrentGeneration(generation)) return;
+    if (!this.isCurrentGeneration(generation) || operationId !== this.poiSearchGeneration) return;
     this.currentDiscoveredPois = pois;
-    this.poiDiscoveryGeneration = generation;
+    this.poiDiscoveryGeneration = operationId;
 
     if (this.ui.elements.poiStatusSubtitle) {
       this.ui.elements.poiStatusSubtitle.textContent = `Found ${this.currentDiscoveredPois.length} public amenities within 1.5km`;
@@ -640,7 +665,8 @@ export class NeighborhoodGuruApp {
   }
 
   applyPoiFilter() {
-    if (!this.isCurrentGeneration(this.poiDiscoveryGeneration)) return;
+    if (this.disposed) return;
+    if (this.poiDiscoveryGeneration !== this.poiSearchGeneration) return;
     const filtered = this.currentDiscoveredPois.filter(p => {
       if (this.poiFilter === 'all') return true;
       if (this.poiFilter === 'cafe') return p.typeLabel.includes('Cafe');
@@ -654,7 +680,8 @@ export class NeighborhoodGuruApp {
   }
 
   importPoi(poi) {
-    if (!this.isCurrentGeneration(this.poiDiscoveryGeneration)) return;
+    if (this.disposed) return;
+    if (this.poiDiscoveryGeneration !== this.poiSearchGeneration) return;
     const placeData = {
       name: poi.name,
       category: poi.category,
@@ -679,7 +706,8 @@ export class NeighborhoodGuruApp {
   }
 
   importAllPois() {
-    if (!this.isCurrentGeneration(this.poiDiscoveryGeneration)) return;
+    if (this.disposed) return;
+    if (this.poiDiscoveryGeneration !== this.poiSearchGeneration) return;
     const filtered = this.currentDiscoveredPois.filter(p => {
       if (this.poiFilter === 'all') return true;
       if (this.poiFilter === 'cafe') return p.typeLabel.includes('Cafe');
@@ -739,6 +767,7 @@ export class NeighborhoodGuruApp {
    * Handle Map Click: Reverse geocode if possible & open editor modal
    */
   async onMapClicked(coords) {
+    if (this.disposed) return;
     const generation = this.neighborhoodGeneration;
     let placeName = '';
     
@@ -770,20 +799,22 @@ export class NeighborhoodGuruApp {
    * Address Search Handler
    */
   async handleAddressSearch() {
-    const generation = this.neighborhoodGeneration;
+    if (this.disposed) return;
     const query = this.ui.elements.addressSearchInput.value.trim();
     if (!query) return;
+    const generation = this.neighborhoodGeneration;
+    const operationId = ++this.addressSearchGeneration;
 
     this.ui.showToast(`Searching for "${query}"...`, 'info');
     const result = await this.mapboxService.geocodeAddress(query);
-    if (!this.isCurrentGeneration(generation)) return;
+    if (!this.isCurrentGeneration(generation) || operationId !== this.addressSearchGeneration) return;
 
     if (result) {
       const coords = { lat: result.lat, lng: result.lng };
       this.mapboxService.flyToLocation(result.lat, result.lng, 16.5);
       
       this.mapboxService.showTempMarker(coords, () => {
-        if (!this.isCurrentGeneration(generation)) return;
+        if (!this.isCurrentGeneration(generation) || operationId !== this.addressSearchGeneration) return;
         this.openLocationEditor({
           lat: result.lat,
           lng: result.lng,
@@ -801,6 +832,7 @@ export class NeighborhoodGuruApp {
    * Set Focused Address as Home Address
    */
   async handleSetHomeAddress() {
+    if (this.disposed) return;
     const generation = this.neighborhoodGeneration;
     const namespaceId = this.storage.getNamespaceId();
     if (!this.mapboxService.map) {
@@ -835,6 +867,10 @@ export class NeighborhoodGuruApp {
    * Delete Location Form Handler
    */
   handleDeleteLocation() {
+    if (this.disposed) {
+      this.ui.showToast?.('App is no longer active. That location was not deleted.', 'error');
+      return;
+    }
     if (!this.editorMatchesCurrentOwner()) {
       this.ui.resetOwnerScopedPresentation?.();
       this.ui.showToast?.('Account changed. That location was not deleted.', 'error');
@@ -850,21 +886,24 @@ export class NeighborhoodGuruApp {
         (place) => this.onPlaceSelected(place),
         (place) => this.openLocationEditor(place)
       );
-      this.ui.closeLocationModal();
+      this.closeLocationEditor();
       this.mapboxService.clearTempMarker();
       this.ui.showToast('Location deleted', 'info');
     }
   }
 
   /**
-   * JamBase venue search. Generation and namespace are captured before the
-   * network call and revalidated after every await, before opening the
-   * picker, before applying a selection, and after fetchVenueDetails().
+   * JamBase venue search. Generation, namespace, and the initiating editor
+   * revision are captured before the network call and revalidated after every
+   * await, before opening the picker, before applying a selection, and before
+   * every form mutation.
    */
   async handleJambaseSearch() {
+    if (this.disposed) return;
     const el = this.ui.elements;
     const generation = this.neighborhoodGeneration;
     const namespaceId = this.storage.getNamespaceId();
+    const editorRevision = this.editorRevision;
     const venueName = el.formName.value.trim();
     const currentInput = el.formJambaseId ? el.formJambaseId.value.trim() : '';
     const query = currentInput || venueName;
@@ -894,7 +933,7 @@ export class NeighborhoodGuruApp {
 
     this.ui.showToast(`Searching JamBase for "${query}"...`, 'info');
     const matches = await JamBaseService.searchVenues(query, locationContext);
-    if (!this.isSameOwnerGeneration(generation, namespaceId)) return;
+    if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
 
     this.ui.openJambasePickerModal();
     if (this.ui.elements.jambasePickerSubtitle) {
@@ -902,18 +941,18 @@ export class NeighborhoodGuruApp {
     }
 
     this.ui.renderJambaseSearchResults(matches, async (selectedVenue) => {
-      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentOwner()) return;
+      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
 
       let capacity = selectedVenue.capacity;
       if (!capacity) {
         const details = await JamBaseService.fetchVenueDetails(selectedVenue.id);
-        if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentOwner()) return;
+        if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
         if (details && details.capacity) {
           capacity = details.capacity;
         }
       }
 
-      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentOwner()) return;
+      if (!this.isSameOwnerGeneration(generation, namespaceId) || !this.editorMatchesCurrentRequest(editorRevision)) return;
 
       if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
 
@@ -934,6 +973,10 @@ export class NeighborhoodGuruApp {
    * Save Location Form Handler
    */
   handleSaveLocation() {
+    if (this.disposed) {
+      this.ui.showToast?.('App is no longer active. That location was not saved.', 'error');
+      return;
+    }
     if (!this.editorMatchesCurrentOwner()) {
       this.ui.resetOwnerScopedPresentation?.();
       this.ui.showToast?.('Account changed. That location was not saved.', 'error');
@@ -981,7 +1024,7 @@ export class NeighborhoodGuruApp {
       (place) => this.openLocationEditor(place)
     );
 
-    this.ui.closeLocationModal();
+    this.closeLocationEditor();
     this.ui.showToast(`Saved location "${name}"!`, 'success');
   }
 

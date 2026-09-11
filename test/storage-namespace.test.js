@@ -19,6 +19,7 @@ import {
   authenticatedWorkingCopyKey,
   isDemoPlace,
   isUserAuthoredWorkingCopy,
+  legacyMigrationClaimKey,
   orphanedWorkingCopyKey,
   workingCopyKey,
 } from '../src/js/storage.js';
@@ -50,6 +51,36 @@ function createMemoryLocalStorage(initial = {}) {
       return Object.keys(store).length;
     },
   };
+}
+
+function wrapLocalStorage(inner, hooks = {}) {
+  return {
+    getItem(key) {
+      if (hooks.getItem) return hooks.getItem(key, inner);
+      return inner.getItem(key);
+    },
+    setItem(key, value) {
+      if (hooks.setItem) return hooks.setItem(key, value, inner);
+      inner.setItem(key, value);
+    },
+    removeItem(key) {
+      if (hooks.removeItem) return hooks.removeItem(key, inner);
+      inner.removeItem(key);
+    },
+    clear() {
+      inner.clear();
+    },
+    key: (index) => inner.key(index),
+    get length() {
+      return inner.length;
+    },
+  };
+}
+
+function storageError(name = 'QuotaExceededError') {
+  const err = new Error(name);
+  err.name = name;
+  return err;
 }
 
 function userPlace(overrides = {}) {
@@ -568,6 +599,220 @@ describe('namespaced browser storage', () => {
     expect(localStorage.getItem(destKey)).toBe(oldVal);
     expect(localStorage.getItem(legacyKey)).toBeNull();
     expect(JSON.parse(localStorage.getItem(orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS))).name).toBe('new');
+  });
+
+  test('failed legacy-key cleanup does not let the next account adopt the data', () => {
+    const home = { name: 'Private legacy home', lat: 1, lng: 1 };
+    const legacyKey = LEGACY_WORKING_COPY_KEYS.home_address;
+    const inner = createMemoryLocalStorage({
+      [legacyKey]: JSON.stringify(home),
+    });
+    let removeFailures = 1;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      removeItem(key, store) {
+        if (key === legacyKey && removeFailures > 0) {
+          removeFailures -= 1;
+          throw storageError();
+        }
+        store.removeItem(key);
+      },
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const aliceRaw = localStorage.getItem(
+      authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
+    );
+    const afterAlice = {
+      aliceDest: aliceRaw ? JSON.parse(aliceRaw).name : null,
+      legacyStillPresent: localStorage.getItem(legacyKey) != null,
+    };
+    expect(afterAlice).toEqual({
+      aliceDest: 'Private legacy home',
+      legacyStillPresent: true,
+    });
+
+    StorageService.setOwner(SESSION_B.user.id);
+    const bobSaw = StorageService.getHomeAddress()?.name ?? null;
+    expect(bobSaw).not.toBe('Private legacy home');
+    expect(bobSaw).toBeNull();
+
+    StorageService.setOwner(SESSION_A.user.id);
+    expect(StorageService.getHomeAddress()?.name).toBe('Private legacy home');
+  });
+
+  test('injected setItem dest failure still claims leftover so Bob cannot adopt', () => {
+    const home = { name: 'Private legacy home', lat: 1, lng: 1 };
+    const legacyKey = LEGACY_WORKING_COPY_KEYS.home_address;
+    const destKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const inner = createMemoryLocalStorage({
+      [legacyKey]: JSON.stringify(home),
+    });
+    let failDestWrite = true;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        if (failDestWrite && key === destKey) {
+          failDestWrite = false;
+          throw storageError();
+        }
+        store.setItem(key, value);
+      },
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    expect(localStorage.getItem(destKey)).toBeNull();
+    expect(localStorage.getItem(legacyKey)).toBeString();
+    expect(JSON.parse(localStorage.getItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS))).namespaceId)
+      .toBe(`user:${SESSION_A.user.id}`);
+
+    StorageService.setOwner(SESSION_B.user.id);
+    expect(StorageService.getHomeAddress()?.name).not.toBe('Private legacy home');
+    expect(StorageService.getHomeAddress()).toBeNull();
+  });
+
+  test('injected getItem dest failure still claims leftover so Bob cannot adopt', () => {
+    const home = { name: 'Private legacy home', lat: 1, lng: 1 };
+    const legacyKey = LEGACY_WORKING_COPY_KEYS.home_address;
+    const destKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const inner = createMemoryLocalStorage({
+      [legacyKey]: JSON.stringify(home),
+    });
+    let failDestRead = true;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      getItem(key, store) {
+        if (failDestRead && key === destKey) {
+          failDestRead = false;
+          throw storageError('SecurityError');
+        }
+        return store.getItem(key);
+      },
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    expect(JSON.parse(localStorage.getItem(legacyMigrationClaimKey(WORKING_COPY_KEYS.HOME_ADDRESS))).namespaceId)
+      .toBe(`user:${SESSION_A.user.id}`);
+
+    StorageService.setOwner(SESSION_B.user.id);
+    expect(StorageService.getHomeAddress()?.name).not.toBe('Private legacy home');
+    expect(StorageService.getHomeAddress()).toBeNull();
+  });
+
+  test('injected removeItem failure is independent of getItem/setItem and blocks the next owner', () => {
+    const places = [userPlace({ name: 'Private leftover cafe' })];
+    const legacyKey = LEGACY_WORKING_COPY_KEYS.saved_places;
+    const inner = createMemoryLocalStorage({
+      [legacyKey]: JSON.stringify(places),
+    });
+    let failRemove = true;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      removeItem(key, store) {
+        if (failRemove && key === legacyKey) {
+          failRemove = false;
+          throw storageError();
+        }
+        store.removeItem(key);
+      },
+    });
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const alicePlacesRaw = localStorage.getItem(
+      authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.SAVED_PLACES),
+    );
+    expect(JSON.parse(alicePlacesRaw).some((place) => place.name === 'Private leftover cafe')).toBe(true);
+    expect(localStorage.getItem(legacyKey)).toBeString();
+
+    StorageService.setOwner(SESSION_B.user.id);
+    expect(StorageService.getSavedPlaces().some((place) => place.name === 'Private leftover cafe')).toBe(false);
+  });
+
+  test('newer write after source re-read and before remove is quarantined not deleted', () => {
+    const destKey = workingCopyKey(ANONYMOUS_OWNER_ID, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const legacyKey = LEGACY_WORKING_COPY_KEYS.home_address;
+    const oldVal = JSON.stringify({ name: 'old', lat: 1, lng: 1 });
+    const midVal = JSON.stringify({ name: 'mid', lat: 2, lng: 2 });
+    const latestVal = JSON.stringify({ name: 'latest', lat: 3, lng: 3 });
+    const inner = createMemoryLocalStorage({
+      [destKey]: oldVal,
+      [legacyKey]: midVal,
+    });
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        store.setItem(key, value);
+        if (key.startsWith('neighborhood_guru:orphaned:') && value === midVal) {
+          store.setItem(legacyKey, latestVal);
+        }
+      },
+    });
+
+    StorageService.setOwner(null);
+
+    const orphanKeys = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('neighborhood_guru:orphaned:')) orphanKeys.push(key);
+    }
+    const orphanValues = orphanKeys.map((key) => JSON.parse(localStorage.getItem(key)).name);
+    expect({
+      dest: JSON.parse(localStorage.getItem(destKey)).name,
+      orphan: orphanValues.includes('mid') ? 'mid' : orphanValues[0],
+      legacy: localStorage.getItem(legacyKey),
+      latestLost: !orphanValues.includes('latest') && localStorage.getItem(legacyKey) == null,
+    }).toEqual({
+      dest: 'old',
+      orphan: 'mid',
+      legacy: null,
+      latestLost: false,
+    });
+    expect(orphanValues).toEqual(expect.arrayContaining(['mid', 'latest']));
+  });
+
+  test('orphaned leftovers are included in export and recoverable via preview/restore', () => {
+    StorageService.setOwner(null);
+    StorageService.setHomeAddress({ name: 'current', lat: 1, lng: 1 });
+    localStorage.setItem(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.HOME_ADDRESS),
+      JSON.stringify({ name: 'recover me', lat: 9, lng: 9 }),
+    );
+
+    const exported = JSON.parse(StorageService.exportDataJSON());
+    expect(exported.homeAddress.name).toBe('current');
+    expect(exported.orphanedWorkingCopies.length).toBeGreaterThan(0);
+    expect(exported.orphanedWorkingCopies.some((orphan) => (
+      orphan.status === 'orphaned'
+      && orphan.homeAddress?.name === 'recover me'
+    ))).toBe(true);
+
+    const preview = StorageService.previewOrphanedWorkingCopies();
+    const recover = preview.find((orphan) => orphan.preview.homeName === 'recover me');
+    expect(recover).toBeTruthy();
+    expect(recover.preview.homeName).toBe('recover me');
+
+    const mergeConflict = StorageService.restoreOrphanedWorkingCopy(recover.key, { mode: 'merge' });
+    expect(mergeConflict.ok).toBe(false);
+    expect(mergeConflict.reason).toBe('conflict');
+    expect(StorageService.getHomeAddress().name).toBe('current');
+
+    const replaced = StorageService.restoreOrphanedWorkingCopy(recover.key, { mode: 'replace' });
+    expect(replaced.ok).toBe(true);
+    expect(StorageService.getHomeAddress().name).toBe('recover me');
+  });
+
+  test('orphaned places can be merged into the current namespace after preview', () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    StorageService.savePlace(userPlace({ id: undefined, name: 'Ada current cafe' }));
+    localStorage.setItem(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES),
+      JSON.stringify([userPlace({ id: 'place_orphan', name: 'recover me cafe' })]),
+    );
+
+    const preview = StorageService.previewOrphanedWorkingCopy(
+      orphanedWorkingCopyKey(WORKING_COPY_KEYS.SAVED_PLACES),
+    );
+    expect(preview.preview.placeNames).toContain('recover me cafe');
+
+    const merged = StorageService.restoreOrphanedWorkingCopy(preview.key, { mode: 'merge' });
+    expect(merged.ok).toBe(true);
+    const names = StorageService.getSavedPlaces().map((place) => place.name);
+    expect(names).toEqual(expect.arrayContaining(['Ada current cafe', 'recover me cafe']));
   });
 });
 
