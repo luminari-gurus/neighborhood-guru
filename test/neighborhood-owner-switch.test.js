@@ -1490,4 +1490,31 @@ describe('owner-switch presentation isolation', () => {
     expect(ui.elements.legacyOwnerOrphanList.innerHTML).toContain('data-orphan-action="merge"');
     expect(ui.elements.exportDeviceRecoveryBtn.classList.hidden).toBe(true);
   });
+
+  test('rejected leftover restore shows an actionable toast and keeps recovery visible', async () => {
+    const previous = globalThis.navigator;
+    globalThis.navigator = {
+      ...(previous || {}),
+      locks: {
+        request() {
+          return Promise.reject(new Error('lock denied'));
+        },
+      },
+    };
+    const ui = createStubUi();
+    try {
+      localStorage.setItem('neighborhood_guru_home_address', JSON.stringify(HOME_A));
+      const { app } = await createBoundApp({ ui, session: SESSION_A });
+      const before = app.storage.legacyMigrationStatus();
+      expect(before.locksAvailable).toBe(true);
+      expect(before.leftoverAdoptable).toBe(true);
+      await app.handleRestoreLegacyLeftover();
+      const after = app.storage.legacyMigrationStatus();
+      expect(after.leftoverAdoptable).toBe(true);
+      expect(after.leftoverUnapplied).toBe(true);
+      expect(ui.toasts.some((message) => String(message).toLowerCase().includes('lock'))).toBe(true);
+    } finally {
+      globalThis.navigator = previous;
+    }
+  });
 });

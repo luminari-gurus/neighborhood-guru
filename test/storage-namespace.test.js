@@ -1726,6 +1726,38 @@ describe('namespaced browser storage', () => {
     expect(StorageService.legacyMigrationStatus().importRollbackIncomplete).toBe(true);
   });
 
+  test('startup recovers an incomplete import journal', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const inner = globalThis.localStorage;
+    let homeWrites = 0;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      setItem(key, value, store) {
+        if (String(key).includes('saved_places')) throw storageError();
+        if (String(key).includes('home_address')) {
+          homeWrites += 1;
+          if (homeWrites > 1) throw storageError();
+        }
+        store.setItem(key, value);
+      },
+    });
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Imported', lat: 2, lng: 2 },
+      savedPlaces: [userPlace({ name: 'After place' })],
+    }));
+    expect(result).toMatchObject({ ok: false, reason: 'rollback-incomplete' });
+    globalThis.localStorage = inner;
+    expect(JSON.parse(inner.getItem(
+      authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
+    )).name).toBe('Imported');
+    await StorageService.ensureLegacyMigratedAsync();
+    expect(JSON.parse(inner.getItem(
+      authenticatedWorkingCopyKey(SESSION_B.user.id, WORKING_COPY_KEYS.HOME_ADDRESS),
+    )).name).toBe('Before');
+    expect(StorageService.legacyMigrationStatus().importRollbackIncomplete).toBe(false);
+  });
+
   test('second import on the same service waits for the Web Lock', async () => {
     const locks = installFakeWebLocks();
     StorageService.setOwner(SESSION_A.user.id, { migrate: false });

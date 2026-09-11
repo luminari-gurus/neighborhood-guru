@@ -858,6 +858,26 @@ function clearImportJournal() {
   }
 }
 
+function recoverImportJournal() {
+  const journal = readImportJournal();
+  if (!journal || journal.status !== 'rollback-incomplete') {
+    if (journal && journal.status !== 'rollback-incomplete') clearImportJournal();
+    return { ok: true, recovered: false };
+  }
+  const snapshot = journal.snapshot && typeof journal.snapshot === 'object' ? journal.snapshot : null;
+  const written = journal.written && typeof journal.written === 'object' ? journal.written : null;
+  if (!snapshot || !written) {
+    return { ok: false, reason: 'rollback-incomplete' };
+  }
+  const attempted = new Map(Object.entries(written));
+  const rolled = restoreWrittenKeysIfUnchanged(snapshot, attempted);
+  if (rolled && storageMatchesSnapshot(snapshot, attempted)) {
+    clearImportJournal();
+    return { ok: true, recovered: true };
+  }
+  return { ok: false, reason: 'rollback-incomplete' };
+}
+
 function importOutcome(ok, reason) {
   return ok ? { ok: true } : { ok: false, reason };
 }
@@ -1082,6 +1102,7 @@ export const StorageService = {
         runOwnerMismatchFailClosed();
         return importOutcome(false, 'owner-changed');
       }
+      recoverImportJournal();
       runExclusiveLegacyMigration(anonymous, ownerId);
       return { ok: true };
     });
@@ -1499,6 +1520,7 @@ export const StorageService = {
         ) {
           return importOutcome(false, 'owner-changed');
         }
+        recoverImportJournal();
         migrationInterleave('after-import-lock', { namespaceId: ownerSnapshot.namespaceId });
 
         const { anonymous, ownerId, namespaceId } = ownerSnapshot;
@@ -1542,10 +1564,12 @@ export const StorageService = {
           const rolled = restoreWrittenKeysIfUnchanged(snapshot, attempted);
           if (!rolled || !storageMatchesSnapshot(snapshot, attempted)) {
             writeImportJournal({
+              v: 1,
               status: 'rollback-incomplete',
               namespaceId,
               at: Date.now(),
-              keys: [...attempted.keys()],
+              snapshot,
+              written: Object.fromEntries(attempted),
             });
             console.error('Failed to roll back neighborhood import');
             return importOutcome(false, 'rollback-incomplete');

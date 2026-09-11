@@ -209,6 +209,8 @@ export class NeighborhoodGuruApp {
 
   handleOwnerOrphanAction(action, key) {
     if (this.disposed || !key) return;
+    const generation = this.neighborhoodGeneration;
+    const namespaceId = this.storage.getNamespaceId();
     const preview = this.storage.previewOrphanedWorkingCopy?.(key);
     if (!preview) {
       this.ui.showToast('That leftover record is not available for this account.', 'warning', 6000);
@@ -229,6 +231,7 @@ export class NeighborhoodGuruApp {
       ? globalThis.confirm(`${mode === 'merge' ? 'Merge' : 'Replace with'} leftover "${label}" in this account?`)
       : true;
     if (!confirmed) return;
+    if (this.disposed || !this.isSameOwnerGeneration(generation, namespaceId)) return;
     const result = this.storage.restoreOrphanedWorkingCopy(key, { mode });
     if (!result?.ok) {
       this.ui.showToast(result?.reason === 'conflict'
