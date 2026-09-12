@@ -23,6 +23,11 @@ export class MapboxService {
     this.currentToken = '';
     this.currentStyle = 'streets';
     this.is3DActive = true;
+    this._onMapClick = null;
+    this._onMapError = null;
+    this._onMapLoad = null;
+    this._mapListeners = [];
+    this.tornDown = false;
   }
 
   /**
@@ -45,6 +50,9 @@ export class MapboxService {
       return null;
     }
 
+    this.tornDown = false;
+    this._mapListeners = [];
+
     try {
       mapboxgl.accessToken = this.currentToken;
       this.currentStyle = preferredStyle;
@@ -65,8 +73,8 @@ export class MapboxService {
 
       this.map = new mapboxgl.Map(mapOptions);
 
-      // Listen for Mapbox token authorization errors or tile load failures
-      this.map.on('error', (e) => {
+      this._onMapError = (e) => {
+        if (this.tornDown) return;
         if (e && e.error) {
           const status = e.error.status;
           const msg = String(e.error.message || '');
@@ -75,30 +83,30 @@ export class MapboxService {
             if (onTokenError) onTokenError(e.error);
           }
         }
-      });
+      };
+      this.bindMapEvent('error', this._onMapError);
 
-      // Add navigation controls
       this.map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'bottom-right');
-
-      // Add scale control
       this.map.addControl(new mapboxgl.ScaleControl({ unit: 'imperial' }), 'bottom-left');
 
-      this.map.on('load', () => {
+      this._onMapLoad = () => {
+        if (this.tornDown || !this.map) return;
         this.setup3DFeatures();
-        if (hasHome) {
-          this.renderHomeMarker(homeAddress);
-        }
-      });
+        if (typeof options.onLoad === 'function') options.onLoad();
+      };
+      this.bindMapEvent('load', this._onMapLoad);
 
       if (onMapClick) {
-        this.map.on('click', (e) => {
+        this._onMapClick = (e) => {
+          if (this.tornDown) return;
           if (e.originalEvent.target.closest('.mapboxgl-popup') || e.originalEvent.target.closest('.custom-map-marker')) {
             return;
           }
           const coords = { lat: e.lngLat.lat, lng: e.lngLat.lng };
           this.showTempMarker(coords);
           onMapClick(coords);
-        });
+        };
+        this.bindMapEvent('click', this._onMapClick);
       }
 
       return this.map;
@@ -107,6 +115,56 @@ export class MapboxService {
       if (onTokenError) onTokenError(err);
       return null;
     }
+  }
+
+  bindMapEvent(type, handler) {
+    if (!this.map || typeof this.map.on !== 'function') return;
+    const wrapped = (...args) => {
+      if (this.tornDown) return;
+      handler(...args);
+    };
+    this.map.on(type, wrapped);
+    this._mapListeners.push({ type, handler: wrapped });
+  }
+
+  unbindMapListeners() {
+    if (this.map && typeof this.map.off === 'function') {
+      for (const { type, handler } of this._mapListeners || []) {
+        try {
+          this.map.off(type, handler);
+        } catch {
+          // Map already removed.
+        }
+      }
+    }
+    this._mapListeners = [];
+    this._onMapClick = null;
+    this._onMapError = null;
+    this._onMapLoad = null;
+  }
+
+  teardownMap() {
+    this.tornDown = true;
+    this.unbindMapListeners();
+    try {
+      this.activeMarkers.forEach((marker) => marker.remove());
+    } catch {
+      // Markers may already be gone.
+    }
+    this.activeMarkers = [];
+    try {
+      this.homeMarker?.remove();
+    } catch {
+      // Home marker may already be gone.
+    }
+    this.homeMarker = null;
+    this.clearTempMarker();
+    try {
+      this.map?.remove?.();
+    } catch {
+      // Mapbox remove is best-effort during HMR/teardown.
+    }
+    this.map = null;
   }
 
   /**
@@ -130,7 +188,7 @@ export class MapboxService {
    * Add 3D Terrain DEM & 3D Extruded Buildings Layer
    */
   setup3DFeatures() {
-    if (!this.map) return;
+    if (this.tornDown || !this.map) return;
 
     // 1. Atmospheric Sky & Fog
     this.setupGlobeEnvironment();
@@ -366,7 +424,7 @@ export class MapboxService {
    * Render or Update Home Marker
    */
   renderHomeMarker(homeAddress) {
-    if (!this.map || !homeAddress) return;
+    if (this.tornDown || !this.map || !homeAddress) return;
 
     if (this.homeMarker) {
       this.homeMarker.remove();
@@ -420,6 +478,7 @@ export class MapboxService {
     if (onTempMarkerClick) {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (this.tornDown) return;
         onTempMarkerClick(coords);
       });
     }
@@ -440,12 +499,14 @@ export class MapboxService {
       .addTo(this.map);
 
     popup.on('open', () => {
+      if (this.tornDown) return;
       const addBtn = popup.getElement().querySelector('.temp-add-btn');
       if (addBtn && onTempMarkerClick) {
-        addBtn.addEventListener('click', () => {
+        addBtn.onclick = () => {
+          if (this.tornDown) return;
           onTempMarkerClick(coords);
           popup.remove();
-        });
+        };
       }
     });
   }
@@ -461,7 +522,7 @@ export class MapboxService {
    * Render all saved neighborhood location markers
    */
   renderSavedMarkers(places = [], onMarkerClick = null) {
-    if (!this.map) return;
+    if (this.tornDown || !this.map) return;
 
     // Clear old active markers
     this.activeMarkers.forEach(marker => marker.remove());
@@ -561,22 +622,29 @@ export class MapboxService {
 
       // Handle Edit button click & async shows fetching inside popup
       popup.on('open', async () => {
-        const editBtn = popup.getElement().querySelector('.popup-edit-btn');
+        if (this.tornDown) return;
+        const root = popup.getElement();
+        if (!root) return;
+        const editBtn = root.querySelector('.popup-edit-btn');
         if (editBtn && onMarkerClick) {
-          editBtn.addEventListener('click', () => {
+          editBtn.onclick = () => {
+            if (this.tornDown) return;
             onMarkerClick(place);
             popup.remove();
-          });
+          };
         }
 
         if (jbId) {
-          const showsBody = popup.getElement().querySelector(`#popup-jb-shows-${place.id} .jb-popup-shows-body`);
-          const refreshBtn = popup.getElement().querySelector(`#popup-jb-shows-${place.id} .popup-refresh-jb-btn`);
+          const showsBody = root.querySelector(`#popup-jb-shows-${place.id} .jb-popup-shows-body`);
+          const refreshBtn = root.querySelector(`#popup-jb-shows-${place.id} .popup-refresh-jb-btn`);
 
           const renderShows = async (force = false) => {
-            if (!showsBody) return;
+            if (this.tornDown || !showsBody) return;
+            const token = String(Number(showsBody.dataset.showsGeneration || '0') + 1);
+            showsBody.dataset.showsGeneration = token;
             if (force) showsBody.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
             const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
+            if (this.tornDown || !showsBody || showsBody.dataset.showsGeneration !== token) return;
             if (shows && shows.length > 0) {
               showsBody.innerHTML = shows.map(s => `
                 <p style="font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; margin-top: 3px; font-weight: ${s.isToday ? '700' : '400'};">
@@ -592,10 +660,11 @@ export class MapboxService {
           renderShows(false);
 
           if (refreshBtn) {
-            refreshBtn.addEventListener('click', (e) => {
+            refreshBtn.onclick = (e) => {
               e.stopPropagation();
+              if (this.tornDown) return;
               renderShows(true);
-            });
+            };
           }
         }
       });

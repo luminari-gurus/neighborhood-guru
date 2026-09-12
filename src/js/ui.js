@@ -6,18 +6,203 @@ export class UIController {
     this.elements = {};
     this.currentFilter = 'all';
     this.searchQuery = '';
+    this.disposed = false;
+    this.listeners = [];
+    this.timeouts = [];
+    this._placesById = new Map();
+    this._placesByToken = new Map();
+    this._onPlaceClick = null;
+    this._onEditClick = null;
+    this._onPoiImport = null;
+    this._discoveredPois = [];
+    this._jambaseMatches = [];
+    this._onJambaseSelect = null;
+    this._delegated = false;
+  }
+
+  listen(target, type, handler) {
+    if (this.disposed || !target || typeof target.addEventListener !== 'function') return;
+    const wrapped = (...args) => {
+      if (this.disposed) return;
+      handler(...args);
+    };
+    target.addEventListener(type, wrapped);
+    this.listeners.push({ target, type, handler: wrapped });
+  }
+
+  scheduleTimeout(fn, delayMs) {
+    if (this.disposed) return null;
+    const id = setTimeout(() => {
+      this.timeouts = this.timeouts.filter((entry) => entry !== id);
+      if (this.disposed) return;
+      fn();
+    }, delayMs);
+    this.timeouts.push(id);
+    return id;
+  }
+
+  dispose() {
+    this.disposed = true;
+    for (const { target, type, handler } of this.listeners) {
+      try {
+        target.removeEventListener(type, handler);
+      } catch {
+        // Node may already be gone.
+      }
+    }
+    this.listeners = [];
+    for (const id of this.timeouts) {
+      try {
+        clearTimeout(id);
+      } catch {
+        // Timer may already have fired.
+      }
+    }
+    this.timeouts = [];
+    this._onPlaceClick = null;
+    this._onEditClick = null;
+    this._onPoiImport = null;
+    this._onJambaseSelect = null;
+    this._placesById.clear();
+    this._placesByToken?.clear();
+    this._discoveredPois = [];
+    this._jambaseMatches = [];
+    try {
+      this.resetOwnerScopedPresentation?.();
+    } catch {
+      // Nodes may already be gone.
+    }
+    try {
+      if (this.elements.savedPlacesList) this.elements.savedPlacesList.innerHTML = '';
+      if (this.elements.poiResultsContainer) this.elements.poiResultsContainer.innerHTML = '';
+      if (this.elements.jambasePickerResultsContainer) this.elements.jambasePickerResultsContainer.innerHTML = '';
+      if (this.elements.peopleListContainer) this.elements.peopleListContainer.innerHTML = '';
+      if (this.elements.contactMethodsContainer) this.elements.contactMethodsContainer.innerHTML = '';
+      if (this.elements.eventsListContainer) this.elements.eventsListContainer.innerHTML = '';
+    } catch {
+      // Nodes may already be gone.
+    }
   }
 
   init() {
     this.cacheElements();
+    this.bindDelegatedEvents();
     this.bindPeopleFieldEvents();
     this.bindContactFieldEvents();
     this.bindEventFieldEvents();
 
     if (this.elements.formCategory) {
-      this.elements.formCategory.addEventListener('change', () => {
+      this.listen(this.elements.formCategory, 'change', () => {
         this.updateCategoryFields(this.elements.formCategory.value);
       });
+    }
+  }
+
+  bindDelegatedEvents() {
+    if (this._delegated) return;
+    this._delegated = true;
+    this.listen(this.elements.savedPlacesList, 'click', (e) => {
+      if (this.disposed) return;
+      const refreshBtn = e.target.closest('.card-refresh-jb-btn');
+      if (refreshBtn) {
+        e.stopPropagation();
+        const box = refreshBtn.closest('.jb-card-shows-box');
+        const jbId = box?.dataset?.jambaseId;
+        const listEl = box?.querySelector('.jb-card-shows-list');
+        if (!jbId || !listEl) return;
+        const token = String(Number(listEl.dataset.showsGeneration || '0') + 1);
+        listEl.dataset.showsGeneration = token;
+        listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
+        JamBaseService.fetchUpcomingShows(jbId, true).then((shows) => {
+          if (this.disposed || !listEl.isConnected || listEl.dataset.showsGeneration !== token) return;
+          this.renderSidebarJamBaseShows(listEl, shows);
+        });
+        return;
+      }
+      if (e.target.closest('a')) {
+        e.stopPropagation();
+        return;
+      }
+      const editBtn = e.target.closest('.edit-place-btn');
+      const flyBtn = e.target.closest('.fly-place-btn');
+      const card = e.target.closest('.place-card');
+      const token = card?.dataset?.renderToken;
+      const place = token ? this._placesByToken.get(token) : null;
+      if (!place) return;
+      if (editBtn) {
+        e.stopPropagation();
+        this._onEditClick?.(place);
+        return;
+      }
+      if (flyBtn) {
+        e.stopPropagation();
+        this._onPlaceClick?.(place);
+        return;
+      }
+      this._onPlaceClick?.(place);
+    });
+    this.listen(this.elements.poiResultsContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-import-single');
+      if (!btn) return;
+      const card = btn.closest('.poi-item-card');
+      const index = Number(card?.dataset?.index);
+      const poi = this._discoveredPois[index];
+      if (!poi) return;
+      this._onPoiImport?.(poi);
+      card.style.opacity = '0.5';
+      btn.textContent = '✓ Imported';
+      btn.disabled = true;
+    });
+    this.listen(this.elements.jambasePickerResultsContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-select-venue');
+      if (!btn) return;
+      const card = btn.closest('.poi-item-card');
+      const index = Number(card?.dataset?.index);
+      const venue = this._jambaseMatches[index];
+      if (!venue) return;
+      this._onJambaseSelect?.(venue);
+      this.closeJambasePickerModal();
+    });
+    this.listen(this.elements.peopleListContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-remove-row');
+      if (btn) btn.closest('.person-row')?.remove();
+    });
+    this.listen(this.elements.contactMethodsContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-remove-row');
+      if (btn) btn.closest('.contact-method-row')?.remove();
+    });
+    this.listen(this.elements.contactMethodsContainer, 'change', (e) => {
+      if (this.disposed) return;
+      const select = e.target.closest('.contact-type-select');
+      if (!select) return;
+      const row = select.closest('.contact-method-row');
+      const valueInput = row?.querySelector('.contact-value-input');
+      if (valueInput) {
+        valueInput.placeholder = select.value.startsWith('email') ? 'e.g. name@example.com' : 'e.g. (555) 000-0000';
+      }
+    });
+    this.listen(this.elements.eventsListContainer, 'click', (e) => {
+      if (this.disposed) return;
+      const btn = e.target.closest('.btn-remove-row');
+      if (btn) btn.closest('.event-row')?.remove();
+    });
+  }
+
+  renderSidebarJamBaseShows(listEl, shows) {
+    if (this.disposed || !listEl) return;
+    if (shows && shows.length > 0) {
+      listEl.innerHTML = shows.map((s) => `
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px; font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; font-weight: ${s.isToday ? '700' : '400'};">
+              <span>${s.isToday ? '🔥 TODAY: ' : '📅 '}<a href="${s.url}" target="_blank" rel="noopener noreferrer" style="color: ${s.isToday ? '#fbbf24' : '#c084fc'}; text-decoration: none;">${this.escapeHtml(s.title)}</a></span>
+              <span style="font-size: 0.7rem; color: #94a3b8; white-space: nowrap;">${this.escapeHtml(s.date)}${s.time ? ` ${this.escapeHtml(s.time)}` : ''}</span>
+            </div>
+          `).join('');
+    } else {
+      listEl.innerHTML = `<p style="font-size: 0.72rem; color: #94a3b8; font-style: italic;">No upcoming shows listed on JamBase.</p>`;
     }
   }
 
@@ -96,6 +281,11 @@ export class UIController {
       savedPlacesList: document.getElementById('saved-places-list'),
       exportDataBtn: document.getElementById('export-data-btn'),
       importFileInput: document.getElementById('import-file-input'),
+      restoreLegacyBtn: document.getElementById('restore-legacy-btn'),
+      exportDeviceRecoveryBtn: document.getElementById('export-device-recovery-btn'),
+      legacyRecoveryBanner: document.getElementById('legacy-recovery-banner'),
+      legacyRecoveryMessage: document.getElementById('legacy-recovery-message'),
+      legacyOwnerOrphanList: document.getElementById('legacy-owner-orphan-list'),
 
       // Settings Modal
       settingsModal: document.getElementById('settings-modal'),
@@ -155,21 +345,24 @@ export class UIController {
    * Header Status Updates
    */
   updateHomeHeaderStatus(homeAddress) {
+    if (this.disposed) return;
+    if (!this.elements?.homeStatusSubtitle) return;
     if (homeAddress && homeAddress.name) {
       const shortAddr = homeAddress.name.split(',')[0];
       this.elements.homeStatusSubtitle.textContent = `Home: ${shortAddr}`;
       this.elements.homeStatusSubtitle.style.color = '#10b981';
-      this.elements.currentHomeDisplay.textContent = homeAddress.name;
-      this.elements.clearHomeBtn.classList.remove('hidden');
+      if (this.elements.currentHomeDisplay) this.elements.currentHomeDisplay.textContent = homeAddress.name;
+      this.elements.clearHomeBtn?.classList.remove('hidden');
     } else {
       this.elements.homeStatusSubtitle.textContent = 'Earth Globe View';
       this.elements.homeStatusSubtitle.style.color = '#3b82f6';
-      this.elements.currentHomeDisplay.textContent = 'No Home address configured yet';
-      this.elements.clearHomeBtn.classList.add('hidden');
+      if (this.elements.currentHomeDisplay) this.elements.currentHomeDisplay.textContent = 'No Home address configured yet';
+      this.elements.clearHomeBtn?.classList.add('hidden');
     }
   }
 
   updateWeatherDisplay(weatherData) {
+    if (this.disposed) return;
     if (!this.elements.weatherHeaderPill) return;
     if (!weatherData) {
       this.elements.weatherHeaderPill.classList.add('hidden');
@@ -202,6 +395,7 @@ export class UIController {
    * OpenStreetMap POI Discovery Modal Controls
    */
   openPoiModal() {
+    if (this.disposed) return;
     if (this.elements.poiDiscoveryModal) {
       this.elements.poiDiscoveryModal.classList.remove('hidden');
     }
@@ -214,8 +408,11 @@ export class UIController {
   }
 
   renderPoiResults(pois = [], onImportClick = null) {
+    if (this.disposed) return;
     const container = this.elements.poiResultsContainer;
     if (!container) return;
+    this._onPoiImport = onImportClick;
+    this._discoveredPois = Array.isArray(pois) ? pois : [];
     container.innerHTML = '';
 
     if (this.elements.poiCountNum) {
@@ -239,9 +436,10 @@ export class UIController {
       return;
     }
 
-    pois.forEach((poi) => {
+    pois.forEach((poi, index) => {
       const card = document.createElement('div');
       card.className = 'poi-item-card';
+      card.dataset.index = String(index);
 
       card.innerHTML = `
         <div class="poi-title-group">
@@ -256,13 +454,6 @@ export class UIController {
         </button>
       `;
 
-      card.querySelector('.btn-import-single').addEventListener('click', () => {
-        if (onImportClick) onImportClick(poi);
-        card.style.opacity = '0.5';
-        card.querySelector('.btn-import-single').textContent = '✓ Imported';
-        card.querySelector('.btn-import-single').disabled = true;
-      });
-
       container.appendChild(card);
     });
   }
@@ -271,6 +462,7 @@ export class UIController {
    * JamBase Venue Match Selector Modal Controls
    */
   openJambasePickerModal() {
+    if (this.disposed) return;
     if (this.elements.jambasePickerModal) {
       this.elements.jambasePickerModal.classList.remove('hidden');
     }
@@ -283,8 +475,11 @@ export class UIController {
   }
 
   renderJambaseSearchResults(matches = [], onSelect = null) {
+    if (this.disposed) return;
     const container = this.elements.jambasePickerResultsContainer;
     if (!container) return;
+    this._onJambaseSelect = onSelect;
+    this._jambaseMatches = Array.isArray(matches) ? matches : [];
     container.innerHTML = '';
 
     if (!matches || matches.length === 0) {
@@ -296,9 +491,10 @@ export class UIController {
       return;
     }
 
-    matches.forEach((venue) => {
+    matches.forEach((venue, index) => {
       const card = document.createElement('div');
       card.className = 'poi-item-card';
+      card.dataset.index = String(index);
 
       const locationBadge = [venue.city, venue.state].filter(Boolean).join(', ');
 
@@ -318,11 +514,6 @@ export class UIController {
         </button>
       `;
 
-      card.querySelector('.btn-select-venue').addEventListener('click', () => {
-        if (onSelect) onSelect(venue);
-        this.closeJambasePickerModal();
-      });
-
       container.appendChild(card);
     });
   }
@@ -332,13 +523,14 @@ export class UIController {
    */
   bindPeopleFieldEvents() {
     if (this.elements.addPersonFieldBtn) {
-      this.elements.addPersonFieldBtn.addEventListener('click', () => {
+      this.listen(this.elements.addPersonFieldBtn, 'click', () => {
         this.addPersonRow('');
       });
     }
   }
 
   renderPeopleFields(people = []) {
+    if (this.disposed) return;
     const container = this.elements.peopleListContainer;
     if (!container) return;
     container.innerHTML = '';
@@ -348,6 +540,7 @@ export class UIController {
   }
 
   addPersonRow(name = '') {
+    if (this.disposed) return;
     const container = this.elements.peopleListContainer;
     if (!container) return;
 
@@ -358,10 +551,6 @@ export class UIController {
       <input type="text" class="person-name-input" placeholder="e.g. Sarah, John, Vickie" value="${this.escapeHtml(name)}" />
       <button type="button" class="btn-remove-row" title="Remove person">&times;</button>
     `;
-
-    row.querySelector('.btn-remove-row').addEventListener('click', () => {
-      row.remove();
-    });
 
     container.appendChild(row);
   }
@@ -384,13 +573,14 @@ export class UIController {
    */
   bindContactFieldEvents() {
     if (this.elements.addContactFieldBtn) {
-      this.elements.addContactFieldBtn.addEventListener('click', () => {
+      this.listen(this.elements.addContactFieldBtn, 'click', () => {
         this.addContactRow('phone_mobile', '', '');
       });
     }
   }
 
   renderContactFields(contacts = []) {
+    if (this.disposed) return;
     const container = this.elements.contactMethodsContainer;
     if (!container) return;
     container.innerHTML = '';
@@ -400,6 +590,7 @@ export class UIController {
   }
 
   addContactRow(type = 'phone_mobile', label = '', value = '') {
+    if (this.disposed) return;
     const container = this.elements.contactMethodsContainer;
     if (!container) return;
 
@@ -421,21 +612,6 @@ export class UIController {
       <input type="text" class="contact-value-input" placeholder="${isEmail ? 'e.g. name@example.com' : 'e.g. (555) 000-0000'}" value="${this.escapeHtml(value)}" />
       <button type="button" class="btn-remove-row" title="Remove method">&times;</button>
     `;
-
-    const select = row.querySelector('.contact-type-select');
-    const valueInput = row.querySelector('.contact-value-input');
-    select.addEventListener('change', () => {
-      const selectedType = select.value;
-      if (selectedType.startsWith('email')) {
-        valueInput.placeholder = 'e.g. name@example.com';
-      } else {
-        valueInput.placeholder = 'e.g. (555) 000-0000';
-      }
-    });
-
-    row.querySelector('.btn-remove-row').addEventListener('click', () => {
-      row.remove();
-    });
 
     container.appendChild(row);
   }
@@ -460,13 +636,14 @@ export class UIController {
    */
   bindEventFieldEvents() {
     if (this.elements.addEventFieldBtn) {
-      this.elements.addEventFieldBtn.addEventListener('click', () => {
+      this.listen(this.elements.addEventFieldBtn, 'click', () => {
         this.addEventRow({ title: '', day: 'friday', time: '' });
       });
     }
   }
 
   renderEventFields(events = []) {
+    if (this.disposed) return;
     const container = this.elements.eventsListContainer;
     if (!container) return;
     container.innerHTML = '';
@@ -476,6 +653,7 @@ export class UIController {
   }
 
   addEventRow(eventObj = { title: '', day: 'friday', time: '' }) {
+    if (this.disposed) return;
     const container = this.elements.eventsListContainer;
     if (!container) return;
 
@@ -502,10 +680,6 @@ export class UIController {
       <button type="button" class="btn-remove-row" title="Remove event">&times;</button>
     `;
 
-    row.querySelector('.btn-remove-row').addEventListener('click', () => {
-      row.remove();
-    });
-
     container.appendChild(row);
   }
 
@@ -528,6 +702,7 @@ export class UIController {
    * Location Editor Modal Controls
    */
   openLocationModal(data = {}) {
+    if (this.disposed) return;
     const isEdit = Boolean(data.id);
     this.elements.locationModalTitle.textContent = isEdit ? 'Edit Location Details' : 'Add Neighborhood Location';
     
@@ -584,13 +759,45 @@ export class UIController {
   }
 
   closeLocationModal() {
-    this.elements.locationModal.classList.add('hidden');
+    this.elements?.locationModal?.classList?.add('hidden');
+  }
+
+  resetLocationEditor() {
+    const el = this.elements || {};
+    if (el.locationForm && typeof el.locationForm.reset === 'function') {
+      el.locationForm.reset();
+    }
+    for (const field of [
+      'formLocationId', 'formLat', 'formLng', 'formName', 'formCategory',
+      'formAddress', 'formNotes', 'formCapacity', 'formJambaseId', 'formPollstarId',
+    ]) {
+      if (el[field]) el[field].value = '';
+    }
+    if (el.locationModalCoords) el.locationModalCoords.textContent = '';
+    if (el.jambaseStatusMsg) el.jambaseStatusMsg.textContent = '';
+    if (el.peopleListContainer) el.peopleListContainer.innerHTML = '';
+    if (el.contactMethodsContainer) el.contactMethodsContainer.innerHTML = '';
+    if (el.eventsListContainer) el.eventsListContainer.innerHTML = '';
+    if (el.poiResultsContainer) el.poiResultsContainer.innerHTML = '';
+    if (el.jambasePickerResultsContainer) el.jambasePickerResultsContainer.innerHTML = '';
+    this.closeLocationModal();
+  }
+
+  /**
+   * Close owner-scoped editors so an account switch cannot leak or submit
+   * another namespace's contacts, notes, or coordinates.
+   */
+  resetOwnerScopedPresentation() {
+    this.resetLocationEditor();
+    this.closePoiModal();
+    this.closeJambasePickerModal();
   }
 
   /**
    * Sidebar Drawer Controls
    */
   toggleSidebar(open = null) {
+    if (this.disposed) return;
     if (open === true) {
       this.elements.placesSidebar.classList.add('open');
     } else if (open === false) {
@@ -604,6 +811,12 @@ export class UIController {
    * Render Saved Places Sidebar List
    */
   renderPlacesList(places = [], onPlaceClick = null, onEditClick = null) {
+    if (this.disposed) return;
+    if (!this.elements?.placesCountBadge || !this.elements?.savedPlacesList) return;
+    this._onPlaceClick = onPlaceClick;
+    this._onEditClick = onEditClick;
+    this._placesById = new Map();
+    this._placesByToken = new Map();
     this.elements.placesCountBadge.textContent = places.length;
     const listContainer = this.elements.savedPlacesList;
     listContainer.innerHTML = '';
@@ -649,10 +862,14 @@ export class UIController {
       return;
     }
 
-    filtered.forEach((place) => {
+    filtered.forEach((place, index) => {
       const card = document.createElement('div');
       card.className = 'place-card';
       card.dataset.id = place.id;
+      const renderToken = `${String(place.id ?? 'place')}:${index}`;
+      card.dataset.renderToken = renderToken;
+      this._placesByToken.set(renderToken, place);
+      this._placesById.set(String(place.id), place);
 
       const people = getPlacePeople(place);
       const contacts = getPlaceContacts(place);
@@ -760,58 +977,19 @@ export class UIController {
         </div>
       `;
 
-      // Click card to fly to location
-      card.querySelector('.fly-place-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (onPlaceClick) onPlaceClick(place);
-      });
-
-      card.querySelector('.edit-place-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (onEditClick) onEditClick(place);
-      });
-
-      card.addEventListener('click', () => {
-        if (onPlaceClick) onPlaceClick(place);
-      });
-
       listContainer.appendChild(card);
     });
 
-    // Asynchronously fetch upcoming shows for all venue cards in sidebar
-    listContainer.querySelectorAll('.jb-card-shows-box').forEach(async (box) => {
+    listContainer.querySelectorAll('.jb-card-shows-box').forEach((box) => {
       const jbId = box.dataset.jambaseId;
       const listEl = box.querySelector('.jb-card-shows-list');
-      const refreshBtn = box.querySelector('.card-refresh-jb-btn');
-
-      const loadShows = async (force = false) => {
-        if (!jbId || !listEl) return;
-        if (force) listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
-        const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
-        if (shows && shows.length > 0) {
-          listEl.innerHTML = shows.map(s => `
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px; font-size: 0.75rem; color: ${s.isToday ? '#fbbf24' : '#e2e8f0'}; font-weight: ${s.isToday ? '700' : '400'};">
-              <span>${s.isToday ? '🔥 TODAY: ' : '📅 '}<a href="${s.url}" target="_blank" rel="noopener noreferrer" style="color: ${s.isToday ? '#fbbf24' : '#c084fc'}; text-decoration: none;">${this.escapeHtml(s.title)}</a></span>
-              <span style="font-size: 0.7rem; color: #94a3b8; white-space: nowrap;">${this.escapeHtml(s.date)}${s.time ? ` ${this.escapeHtml(s.time)}` : ''}</span>
-            </div>
-          `).join('');
-
-          listEl.querySelectorAll('a').forEach(a => {
-            a.addEventListener('click', (e) => e.stopPropagation());
-          });
-        } else {
-          listEl.innerHTML = `<p style="font-size: 0.72rem; color: #94a3b8; font-style: italic;">No upcoming shows listed on JamBase.</p>`;
-        }
-      };
-
-      loadShows(false);
-
-      if (refreshBtn) {
-        refreshBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          loadShows(true);
-        });
-      }
+      if (!jbId || !listEl) return;
+      const token = String(Number(listEl.dataset.showsGeneration || '0') + 1);
+      listEl.dataset.showsGeneration = token;
+      JamBaseService.fetchUpcomingShows(jbId, false).then((shows) => {
+        if (this.disposed || !listEl.isConnected || listEl.dataset.showsGeneration !== token) return;
+        this.renderSidebarJamBaseShows(listEl, shows);
+      });
     });
   }
 
@@ -819,6 +997,7 @@ export class UIController {
    * Settings Modal Controls
    */
   openSettingsModal(mapboxToken, jambaseToken) {
+    if (this.disposed) return;
     if (this.elements.settingsMapboxToken) {
       this.elements.settingsMapboxToken.value = mapboxToken || '';
     }
@@ -829,6 +1008,7 @@ export class UIController {
   }
 
   closeSettingsModal() {
+    if (this.disposed) return;
     this.elements.settingsModal.classList.add('hidden');
   }
 
@@ -836,6 +1016,7 @@ export class UIController {
    * Dedicated Key Prompt Modal & Key Warning State
    */
   openKeyPromptModal(token = '') {
+    if (this.disposed) return;
     if (this.elements.promptMapboxToken) {
       this.elements.promptMapboxToken.value = token || '';
     }
@@ -845,12 +1026,14 @@ export class UIController {
   }
 
   closeKeyPromptModal() {
+    if (this.disposed) return;
     if (this.elements.keyPromptModal) {
       this.elements.keyPromptModal.classList.add('hidden');
     }
   }
 
   updateKeyWarningState(hasKey = true) {
+    if (this.disposed) return;
     if (hasKey) {
       if (this.elements.keyWarningBanner) this.elements.keyWarningBanner.classList.add('hidden');
       if (this.elements.keyWarningDot) this.elements.keyWarningDot.classList.add('hidden');
@@ -861,9 +1044,100 @@ export class UIController {
   }
 
   /**
+   * Leftover unprefixed keys / device recovery. Shown instead of silently
+   * seeding demos when Web Locks cannot finish a one-time upgrade.
+   */
+  updateLegacyRecoveryBanner(status = {}) {
+    if (this.disposed) return;
+    const banner = this.elements.legacyRecoveryBanner;
+    const message = this.elements.legacyRecoveryMessage;
+    const restoreBtn = this.elements.restoreLegacyBtn;
+    const downloadBtn = this.elements.exportDeviceRecoveryBtn;
+    const orphanList = this.elements.legacyOwnerOrphanList;
+    if (!banner) return;
+    const leftoverUnapplied = Boolean(status.leftoverUnapplied);
+    const leftoverAdoptable = status.leftoverAdoptable == null
+      ? leftoverUnapplied
+      : Boolean(status.leftoverAdoptable);
+    const ownerOrphans = Array.isArray(status.ownerOrphans) ? status.ownerOrphans : [];
+    const deviceOrphans = Array.isArray(status.deviceOrphans) ? status.deviceOrphans.length : 0;
+    const ambiguousLeftovers = Array.isArray(status.ambiguousLeftovers) ? status.ambiguousLeftovers : [];
+    const rollbackIncomplete = Boolean(status.importRollbackIncomplete);
+    const foreignImportUnresolved = Boolean(status.foreignImportJournalUnresolved);
+    const needsAttention = leftoverUnapplied
+      || ownerOrphans.length > 0
+      || deviceOrphans > 0
+      || ambiguousLeftovers.length > 0
+      || rollbackIncomplete
+      || foreignImportUnresolved;
+    if (!needsAttention) {
+      banner.classList.add('hidden');
+      if (orphanList) orphanList.innerHTML = '';
+      return;
+    }
+    banner.classList.remove('hidden');
+    const parts = [];
+    if (rollbackIncomplete) {
+      parts.push('A previous import did not finish rolling back. Download a recovery file and review this device before continuing.');
+    }
+    if (foreignImportUnresolved) {
+      parts.push('Another account on this device has an unfinished import. Sign in to that account to recover it.');
+    }
+    if (leftoverAdoptable && !status.locksAvailable) {
+      parts.push('Previous neighborhood data is still on this device and was not applied automatically (this browser cannot take a Web Lock).');
+    } else if (leftoverAdoptable) {
+      parts.push('Previous neighborhood data is still on this device. Restore it into this account or download a recovery file.');
+    } else if (leftoverUnapplied) {
+      parts.push('Previous neighborhood data is still on this device and cannot be restored into this account. Download a recovery file.');
+    }
+    if (ambiguousLeftovers.length > 0) {
+      parts.push('Newer leftover data was written after the last upgrade and was not applied. Download a recovery file.');
+    }
+    if (ownerOrphans.length > 0) {
+      parts.push(`${ownerOrphans.length} leftover record(s) belong to this account.`);
+    }
+    if (deviceOrphans > 0) {
+      parts.push(`${deviceOrphans} device-level leftover record(s) are not bound to this account.`);
+    }
+    if (message) message.textContent = parts.join(' ');
+    if (restoreBtn) {
+      restoreBtn.classList.toggle('hidden', !leftoverAdoptable);
+      restoreBtn.disabled = leftoverAdoptable && !status.locksAvailable;
+    }
+    const showDeviceDownload = deviceOrphans > 0
+      || ambiguousLeftovers.length > 0
+      || leftoverUnapplied
+      || leftoverAdoptable
+      || rollbackIncomplete;
+    if (downloadBtn) {
+      downloadBtn.classList.toggle('hidden', !showDeviceDownload);
+    }
+    if (orphanList) {
+      orphanList.innerHTML = ownerOrphans.map((orphan) => {
+        const label = this.escapeHtml(
+          orphan.preview?.homeName
+          || (Array.isArray(orphan.preview?.placeNames) && orphan.preview.placeNames[0])
+          || orphan.key
+          || 'leftover',
+        );
+        const key = this.escapeHtml(orphan.key || '');
+        return `<div class="legacy-owner-orphan-row" data-orphan-key="${key}">
+          <span>${label}</span>
+          <span class="legacy-recovery-actions">
+            <button type="button" class="btn btn-secondary btn-sm" data-orphan-action="preview" data-orphan-key="${key}">Preview</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-orphan-action="merge" data-orphan-key="${key}">Merge</button>
+            <button type="button" class="btn btn-accent btn-sm" data-orphan-action="replace" data-orphan-key="${key}">Replace</button>
+          </span>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  /**
    * Toast Notifications System
    */
   showToast(message, type = 'info', durationMs = 3500) {
+    if (this.disposed) return;
     const container = this.elements.toastContainer || document.getElementById('toast-container');
     if (!container) {
       console.warn('Toast container missing:', message);
@@ -881,10 +1155,10 @@ export class UIController {
     toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
     container.appendChild(toast);
 
-    setTimeout(() => {
+    this.scheduleTimeout(() => {
       toast.style.opacity = '0';
       toast.style.transition = 'opacity 0.3s ease';
-      setTimeout(() => toast.remove(), 300);
+      this.scheduleTimeout(() => toast.remove(), 300);
     }, durationMs);
   }
 

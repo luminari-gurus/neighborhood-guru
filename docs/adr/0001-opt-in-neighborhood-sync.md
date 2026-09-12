@@ -230,12 +230,18 @@ Logical key layout (implementation may prefix with a helper):
 
 | Data | Anonymous | Authenticated |
 | --- | --- | --- |
-| Home / places / sync consent / dirty / last etag | `neighborhood_guru:anonymous:…` | `neighborhood_guru:${userId}:…` |
+| Home / places / sync consent / dirty / last etag | `neighborhood_guru:anonymous:…` | `neighborhood_guru:user:${encodeURIComponent(userId)}:…` |
 | Map style | Device preference; not namespaced in v1; **not synced** | Same |
 | Mapbox / JamBase tokens | Device-level; **not synced** | Same. Optional later namespacing is a separate hardening issue. |
 | JamBase show cache | Device cache; **not synced** | Same |
 
-Existing unprefixed keys (`neighborhood_guru_home_address`, `neighborhood_guru_saved_places`) migrate **once** into the anonymous namespace so current users are not reset. That migration is local and is not an upload.
+Existing unprefixed keys (`neighborhood_guru_home_address`, `neighborhood_guru_saved_places`) migrate **once** into the anonymous namespace, or into the sole restored `user.id` namespace when that session is already active, so current users are not reset. That migration is local and is not an upload. Authenticated keys use a distinct `user:` tag so a `user.id` of `anonymous` cannot collide with the unsigned-in bucket; opaque ids are encoded rather than interpolated raw.
+
+**Legacy key retention.** `localStorage` cannot compare-and-remove, so unprefixed leftover keys are **retained indefinitely** after a successful copy. A durable `neighborhood_guru:legacy-claim:${suffix}` record binds leftover to the namespace that started migration (`nonce`, `namespaceId`, `fingerprint`, `status: pending | migrated | orphaned`). Other accounts must not adopt a claimed leftover. A completed claim is current only while its fingerprint still matches the retained value; a later older-tab edit becomes an ambiguous device-level recovery item (never auto-adopted, exported only through the warned device-recovery flow). Exclusive adoption runs only while holding a Web Lock. Cleanup of leftover keys is deferred until every writer participates in the same lock/version protocol or an explicit compatibility boundary ships.
+
+Divergent leftover that cannot be copied into an occupied destination is quarantined under owner-stamped `neighborhood_guru:orphaned:…` envelopes. Owner-bound orphans are previewable/mergeable/replaceable in the current account. Device-level and fingerprint-mismatched leftovers use a separately warned download.
+
+JSON import journals (`neighborhood_guru:import-journal:${namespaceId}`) are owner-private. A verified `pending` journal is written before the first destructive import write; success is acknowledged only after a verified terminal `committed` status. Startup recovery executes only the active namespace: it rolls `pending` / `rollback-incomplete` journals back to their snapshot. A `committed` journal is terminal — cleanup may be retried, but intended values are never re-applied. Starting another account must not execute a foreign journal. Ordinary device-recovery download includes only the active namespace’s journal; exposing another account’s journal requires `exportPrivilegedDeviceRecoveryJSON()`.
 
 **Sign-out** switches the working copy to the anonymous namespace. It must not copy authenticated places into anonymous keys.
 
