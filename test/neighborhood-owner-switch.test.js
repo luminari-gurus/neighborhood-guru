@@ -14,9 +14,11 @@ import {
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = globalThis.localStorage;
 const originalConfirm = globalThis.confirm;
+const originalFileReader = globalThis.FileReader;
 const originalSearchVenues = JamBaseService.searchVenues;
 const originalFetchVenueDetails = JamBaseService.fetchVenueDetails;
 const originalFetchNearbyPois = OverpassService.fetchNearbyPois;
+const originalImportDataJSON = StorageService.importDataJSON;
 
 const SESSION_A = {
   user: { id: 'user-ada', displayName: 'Ada', email: 'ada@example.test', avatarUrl: null },
@@ -215,6 +217,10 @@ function createStubMapbox({ geocode } = {}) {
   };
 }
 
+async function flushMicrotasks(rounds = 20) {
+  for (let i = 0; i < rounds; i += 1) await Promise.resolve();
+}
+
 async function createBoundApp({ ui, mapboxService, session = SESSION_A } = {}) {
   const client = new FakeAuthClient({ session });
   const auth = createAuthState(client);
@@ -261,9 +267,11 @@ describe('owner-switch presentation isolation', () => {
     globalThis.localStorage = originalLocalStorage;
     globalThis.navigator = originalNavigator;
     globalThis.confirm = originalConfirm;
+    globalThis.FileReader = originalFileReader;
     JamBaseService.searchVenues = originalSearchVenues;
     JamBaseService.fetchVenueDetails = originalFetchVenueDetails;
     OverpassService.fetchNearbyPois = originalFetchNearbyPois;
+    StorageService.importDataJSON = originalImportDataJSON;
   });
 
   test('switching accounts closes the editor and cannot save A into B', async () => {
@@ -1672,26 +1680,12 @@ describe('owner-switch presentation isolation', () => {
       expect(ui.toasts.some((message) => String(message).toLowerCase().includes('lock'))).toBe(true);
     } finally {
       globalThis.FileReader = originalFileReader;
+      StorageService.importDataJSON = originalImportDataJSON;
     }
   });
 
   test('queued import owner change shows a toast and does not write the new account', async () => {
     const locks = installHoldableWebLocks();
-    const originalFileReader = globalThis.FileReader;
-    globalThis.FileReader = class FakeFileReader {
-      readAsText() {
-        queueMicrotask(() => {
-          this.onload?.({
-            target: {
-              result: JSON.stringify({
-                version: 1,
-                homeAddress: { name: 'Alice backup', lat: 2, lng: 2 },
-              }),
-            },
-          });
-        });
-      }
-    };
     const ui = createStubUi();
     let changeHandler = null;
     ui.elements.importFileInput = {
@@ -1700,6 +1694,18 @@ describe('owner-switch presentation isolation', () => {
       },
       removeEventListener() {},
     };
+    globalThis.FileReader = class FakeFileReader {
+      readAsText() {
+        this.onload?.({
+          target: {
+            result: JSON.stringify({
+              version: 1,
+              homeAddress: { name: 'Alice backup', lat: 2, lng: 2 },
+            }),
+          },
+        });
+      }
+    };
     try {
       StorageService.setOwner(SESSION_B.user.id, { migrate: false });
       StorageService.setHomeAddress({ name: 'Bob home', lat: 3, lng: 3 });
@@ -1707,23 +1713,40 @@ describe('owner-switch presentation isolation', () => {
       StorageService.setHomeAddress({ name: 'Alice current', lat: 1, lng: 1 });
 
       const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+      const waiters = [];
+      globalThis.navigator = {
+        ...(globalThis.navigator || {}),
+        locks: {
+          request(name, options, callback) {
+            if (typeof options === 'function') {
+              callback = options;
+            }
+            return new Promise((resolve, reject) => {
+              waiters.push(() => {
+                Promise.resolve()
+                  .then(() => callback())
+                  .then(resolve, reject);
+              });
+            });
+          },
+        },
+      };
       app.bindEvents();
       expect(changeHandler).toBeTypeOf('function');
 
-      locks.hold();
       changeHandler({ target: { files: [{ name: 'backup.json' }] } });
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(locks.pendingCount()).toBeGreaterThan(0);
+      for (let i = 0; i < 30 && waiters.length === 0; i += 1) {
+        await Promise.resolve();
+      }
+      expect(waiters.length).toBeGreaterThan(0);
+      const importGrant = waiters[0];
 
       await auth.signIn({ session: SESSION_B });
       expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
-
-      locks.releaseAll();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      importGrant();
+      await flushMicrotasks();
+      waiters.slice(1).forEach((run) => run());
+      await flushMicrotasks();
 
       expect(StorageService.getHomeAddress()?.name).toBe('Bob home');
       StorageService.setOwner(SESSION_A.user.id, { migrate: false });
@@ -1733,7 +1756,6 @@ describe('owner-switch presentation isolation', () => {
 
       app.dispose();
     } finally {
-      globalThis.FileReader = originalFileReader;
       globalThis.navigator = locks.previous;
     }
   });
