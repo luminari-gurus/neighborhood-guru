@@ -1883,6 +1883,95 @@ describe('namespaced browser storage', () => {
     expect(importJournalEntries()).toEqual([]);
   });
 
+  test('committed import is not rolled back if journal deletion fails', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const inner = globalThis.localStorage;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      removeItem(key, store) {
+        if (String(key).includes('import-journal')) throw storageError();
+        store.removeItem(key);
+      },
+    });
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+    }));
+    expect(result).toMatchObject({ ok: true });
+    expect(StorageService.getHomeAddress().name).toBe('After');
+    const journals = importJournalEntries(inner);
+    expect(journals.length).toBeGreaterThan(0);
+    expect(JSON.parse(journals[0][1]).status).toBe('committed');
+
+    const recovered = await StorageService.ensureLegacyMigratedAsync();
+    expect(recovered).toMatchObject({ ok: true });
+    expect(StorageService.getHomeAddress().name).toBe('After');
+  });
+
+  test('startup preserves a committed import left behind after success', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const aliceHomeKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    let committedSnap = null;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase) => {
+      if (phase === 'after-import-committed') committedSnap = snapshotStorage();
+    };
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+    }));
+    expect(result).toMatchObject({ ok: true });
+    expect(committedSnap).not.toBeNull();
+    restoreStorage(committedSnap);
+    expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('After');
+    expect(JSON.parse(importJournalEntries()[0][1]).status).toBe('committed');
+
+    const bob = createStorageService();
+    bob.setOwner(SESSION_B.user.id, { migrate: false });
+    const recovered = await bob.ensureLegacyMigratedAsync();
+    expect(recovered).toMatchObject({ ok: true });
+    expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('After');
+  });
+
+  test('ordinary device recovery does not export another account import journal', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Alice original home', lat: 1, lng: 1 });
+    StorageService.savePlace({ name: 'Alice original place', lat: 2, lng: 2 });
+    let crashSnap = null;
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase, detail) => {
+      if (phase === 'after-import-write' && String(detail?.key || '').includes('home_address')) {
+        crashSnap = snapshotStorage();
+      }
+    };
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = ({ key }) => {
+      if (String(key).includes('saved_places')) throw new Error('simulated-crash');
+    };
+    await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Alice imported home', lat: 3, lng: 3 },
+      savedPlaces: [userPlace({ name: 'Alice imported place' })],
+    }));
+    restoreStorage(crashSnap);
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = undefined;
+    globalThis.__NG_STORAGE_WRITE_HOOK__ = undefined;
+
+    const bob = createStorageService();
+    bob.setOwner(SESSION_B.user.id, { migrate: false });
+    const bobStatus = bob.legacyMigrationStatus();
+    expect(bobStatus.importRollbackIncomplete).toBe(false);
+    expect(bobStatus.foreignImportJournalUnresolved).toBe(true);
+    const ordinary = JSON.parse(bob.exportDeviceRecoveryJSON());
+    const ordinaryText = JSON.stringify(ordinary);
+    expect(ordinaryText).not.toContain('Alice original home');
+    expect(ordinaryText).not.toContain('Alice imported home');
+    expect(ordinary.importJournals).toEqual([]);
+    const privileged = JSON.parse(bob.exportPrivilegedDeviceRecoveryJSON());
+    const privilegedText = JSON.stringify(privileged);
+    expect(privileged.kind).toBe('privileged-device-recovery');
+    expect(privilegedText).toContain('Alice original home');
+    expect(privilegedText).toContain('Alice imported home');
+  });
+
   test('second import on the same service waits for the Web Lock', async () => {
     const locks = installFakeWebLocks();
     StorageService.setOwner(SESSION_A.user.id, { migrate: false });

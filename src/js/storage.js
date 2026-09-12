@@ -871,20 +871,54 @@ function persistImportJournalVerified(entry) {
   return writeItemVerified(key, raw);
 }
 
+function journalIsUnresolved(journal) {
+  return Boolean(journal && (journal.status === 'pending' || journal.status === 'rollback-incomplete'));
+}
+
+function journalBelongsToNamespace(journal, namespaceId) {
+  return Boolean(journal && journal.namespaceId === namespaceId);
+}
+
 function clearImportJournalAt(key) {
   try {
     removeItem(key);
   } catch {
-    // Ignore.
+    return false;
   }
+  return readItem(key) == null;
 }
 
 function clearImportJournalFor(namespaceId) {
-  clearImportJournalAt(importJournalKeyFor(namespaceId));
+  const namespaced = clearImportJournalAt(importJournalKeyFor(namespaceId));
+  let globalOk = true;
   const globalJournal = readImportJournalAt(IMPORT_JOURNAL_KEY);
   if (globalJournal && globalJournal.namespaceId === namespaceId) {
-    clearImportJournalAt(IMPORT_JOURNAL_KEY);
+    globalOk = clearImportJournalAt(IMPORT_JOURNAL_KEY);
   }
+  return namespaced && globalOk;
+}
+
+/**
+ * Re-apply a committed import. Never restore the pre-import snapshot.
+ * Concurrent values that match neither snapshot nor intended are left in place.
+ */
+function restoreCommittedIntended(snapshot, intended) {
+  let complete = true;
+  for (const [key, value] of Object.entries(intended)) {
+    const current = readItem(key);
+    if (current === value) continue;
+    const original = snapshot && Object.prototype.hasOwnProperty.call(snapshot, key)
+      ? snapshot[key]
+      : undefined;
+    if (current != null && current !== original && current !== value) continue;
+    try {
+      applyStoredValue(key, value);
+      if (readItem(key) !== value) complete = false;
+    } catch {
+      complete = false;
+    }
+  }
+  return complete;
 }
 
 function journalIntendedMap(journal) {
@@ -905,13 +939,21 @@ function recoverImportJournalAt(key) {
   if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
     return { ok: false, reason: 'rollback-incomplete' };
   }
-  if (journal.status !== 'pending' && journal.status !== 'rollback-incomplete') {
-    return { ok: false, reason: 'rollback-incomplete' };
-  }
   const snapshot = journal.snapshot && typeof journal.snapshot === 'object' && !Array.isArray(journal.snapshot)
     ? journal.snapshot
     : null;
   const intended = journalIntendedMap(journal);
+  if (journal.status === 'committed') {
+    if (!intended) return { ok: false, reason: 'rollback-incomplete' };
+    if (!restoreCommittedIntended(snapshot, intended)) {
+      return { ok: false, reason: 'rollback-incomplete' };
+    }
+    clearImportJournalAt(key);
+    return { ok: true, recovered: true };
+  }
+  if (journal.status !== 'pending' && journal.status !== 'rollback-incomplete') {
+    return { ok: false, reason: 'rollback-incomplete' };
+  }
   if (!snapshot || !intended) {
     return { ok: false, reason: 'rollback-incomplete' };
   }
@@ -942,18 +984,29 @@ function recoverAllImportJournals() {
   return allOk ? { ok: true, recovered } : { ok: false, reason: 'rollback-incomplete' };
 }
 
-function hasUnresolvedImportJournal() {
+function hasUnresolvedImportJournalFor(namespaceId) {
   return listImportJournalStorageKeys().some((key) => {
     const journal = readImportJournalAt(key);
-    return Boolean(journal && (journal.status === 'pending' || journal.status === 'rollback-incomplete'));
+    return journalIsUnresolved(journal) && journalBelongsToNamespace(journal, namespaceId);
   });
 }
 
-function listImportJournalsForExport() {
+function hasForeignUnresolvedImportJournal(namespaceId) {
+  return listImportJournalStorageKeys().some((key) => {
+    const journal = readImportJournalAt(key);
+    return journalIsUnresolved(journal) && !journalBelongsToNamespace(journal, namespaceId);
+  });
+}
+
+function listImportJournalsForExport({ namespaceId = null, privileged = false } = {}) {
   return listImportJournalStorageKeys().map((key) => ({
     key,
     journal: readImportJournalAt(key),
-  })).filter((entry) => entry.journal);
+  })).filter((entry) => {
+    if (!entry.journal) return false;
+    if (privileged) return true;
+    return journalBelongsToNamespace(entry.journal, namespaceId);
+  });
 }
 
 function importOutcome(ok, reason) {
@@ -1206,7 +1259,8 @@ export const StorageService = {
       ambiguousLeftovers,
       ownerOrphans: this.listOrphanedWorkingCopies(),
       deviceOrphans: this.listDeviceOrphanedWorkingCopies(),
-      importRollbackIncomplete: hasUnresolvedImportJournal(),
+      importRollbackIncomplete: hasUnresolvedImportJournalFor(this.getNamespaceId()),
+      foreignImportJournalUnresolved: hasForeignUnresolvedImportJournal(this.getNamespaceId()),
     };
   },
 
@@ -1512,6 +1566,7 @@ export const StorageService = {
   /**
    * Explicit device-level recovery. Ambiguous historical leftovers are not
    * attached to the active account; callers must show provenance warnings.
+   * Authenticated import journals are owner-private and are not included.
    */
   exportDeviceRecoveryJSON() {
     return JSON.stringify({
@@ -1522,7 +1577,24 @@ export const StorageService = {
       pendingLegacyWorkingCopies: this.listPendingLegacyWorkingCopies(),
       ambiguousLegacyWorkingCopies: listAmbiguousLegacyWorkingCopies(),
       deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
-      importJournals: listImportJournalsForExport(),
+      importJournals: listImportJournalsForExport({ namespaceId: this.getNamespaceId() }),
+    }, null, 2);
+  },
+
+  /**
+   * Privileged device-wide recovery. Includes import journals from every
+   * owner on this browser. Ordinary Settings/banner download must not call this.
+   */
+  exportPrivilegedDeviceRecoveryJSON() {
+    return JSON.stringify({
+      version: 1,
+      kind: 'privileged-device-recovery',
+      exportedAt: new Date().toISOString(),
+      warning: 'Includes import journals from every account on this device, including private home addresses and places. Use only when you intend to recover data for all owners.',
+      pendingLegacyWorkingCopies: this.listPendingLegacyWorkingCopies(),
+      ambiguousLegacyWorkingCopies: listAmbiguousLegacyWorkingCopies(),
+      deviceOrphanedWorkingCopies: this.listDeviceOrphanedWorkingCopies(),
+      importJournals: listImportJournalsForExport({ privileged: true }),
     }, null, 2);
   },
 
@@ -1669,6 +1741,11 @@ export const StorageService = {
           for (const [key, value] of Object.entries(journal.intended)) {
             if (readItem(key) !== value) throw new Error('commit-verify-failed');
           }
+          journal.status = 'committed';
+          if (!persistImportJournalVerified(journal)) {
+            throw new Error('journal-write-failed');
+          }
+          migrationInterleave('after-import-committed', { namespaceId });
           clearImportJournalFor(namespaceId);
           return { ok: true };
         } catch (e) {

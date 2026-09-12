@@ -1063,11 +1063,13 @@ export class UIController {
     const deviceOrphans = Array.isArray(status.deviceOrphans) ? status.deviceOrphans.length : 0;
     const ambiguousLeftovers = Array.isArray(status.ambiguousLeftovers) ? status.ambiguousLeftovers : [];
     const rollbackIncomplete = Boolean(status.importRollbackIncomplete);
+    const foreignImportUnresolved = Boolean(status.foreignImportJournalUnresolved);
     const needsAttention = leftoverUnapplied
       || ownerOrphans.length > 0
       || deviceOrphans > 0
       || ambiguousLeftovers.length > 0
-      || rollbackIncomplete;
+      || rollbackIncomplete
+      || foreignImportUnresolved;
     if (!needsAttention) {
       banner.classList.add('hidden');
       if (orphanList) orphanList.innerHTML = '';
@@ -1077,6 +1079,9 @@ export class UIController {
     const parts = [];
     if (rollbackIncomplete) {
       parts.push('A previous import did not finish rolling back. Download a recovery file and review this device before continuing.');
+    }
+    if (foreignImportUnresolved) {
+      parts.push('Another account on this device has an unfinished import. Sign in to that account to recover it.');
     }
     if (leftoverAdoptable && !status.locksAvailable) {
       parts.push('Previous neighborhood data is still on this device and was not applied automatically (this browser cannot take a Web Lock).');

@@ -170,7 +170,7 @@ export class NeighborhoodGuruApp {
     if (this.disposed) return;
     const status = typeof this.storage.legacyMigrationStatus === 'function'
       ? this.storage.legacyMigrationStatus()
-      : { leftoverPresent: false, leftoverUnapplied: false, leftoverAdoptable: false, locksAvailable: true, leftovers: [], ambiguousLeftovers: [], ownerOrphans: [], deviceOrphans: [], importRollbackIncomplete: false };
+      : { leftoverPresent: false, leftoverUnapplied: false, leftoverAdoptable: false, locksAvailable: true, leftovers: [], ambiguousLeftovers: [], ownerOrphans: [], deviceOrphans: [], importRollbackIncomplete: false, foreignImportJournalUnresolved: false };
     this.ui.updateLegacyRecoveryBanner?.(status);
   }
 
