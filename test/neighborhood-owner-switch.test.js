@@ -1549,6 +1549,35 @@ describe('owner-switch presentation isolation', () => {
     expect(ui.elements.exportDeviceRecoveryBtn.classList.hidden).toBe(true);
   });
 
+  test('foreign unresolved import journal does not invite a device recovery download', () => {
+    const ui = new UIController();
+    const classes = new Set(['hidden']);
+    ui.elements.legacyRecoveryBanner = {
+      classList: {
+        add(name) { classes.add(name); },
+        remove(name) { classes.delete(name); },
+      },
+    };
+    ui.elements.legacyRecoveryMessage = { textContent: '' };
+    ui.elements.restoreLegacyBtn = { disabled: false, classList: { toggle() {} } };
+    ui.elements.exportDeviceRecoveryBtn = { classList: { hidden: false, toggle(name, force) { this.hidden = force; } } };
+    ui.elements.legacyOwnerOrphanList = { innerHTML: '' };
+    ui.updateLegacyRecoveryBanner({
+      leftoverUnapplied: false,
+      leftoverAdoptable: false,
+      locksAvailable: true,
+      ownerOrphans: [],
+      deviceOrphans: [],
+      ambiguousLeftovers: [],
+      importRollbackIncomplete: false,
+      foreignImportJournalUnresolved: true,
+    });
+    expect(classes.has('hidden')).toBe(false);
+    expect(ui.elements.legacyRecoveryMessage.textContent).toContain('Another account on this device has an unfinished import');
+    expect(ui.elements.legacyRecoveryMessage.textContent).not.toContain('Download a recovery file');
+    expect(ui.elements.exportDeviceRecoveryBtn.classList.hidden).toBe(true);
+  });
+
   test('lock-unavailable import is not reported as invalid format', async () => {
     const ui = createStubUi();
     let changeHandler = null;

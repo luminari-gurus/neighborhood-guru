@@ -1566,7 +1566,9 @@ export const StorageService = {
   /**
    * Explicit device-level recovery. Ambiguous historical leftovers are not
    * attached to the active account; callers must show provenance warnings.
-   * Authenticated import journals are owner-private and are not included.
+   * Authenticated import journals are owner-private: only the active
+   * namespace’s journal is included. Foreign journals require
+   * `exportPrivilegedDeviceRecoveryJSON()`.
    */
   exportDeviceRecoveryJSON() {
     return JSON.stringify({
