@@ -1877,8 +1877,20 @@ describe('namespaced browser storage', () => {
       version: 1,
       homeAddress: { name: 'Bob backup', lat: 5, lng: 5 },
     }));
-    expect(bobImport).toMatchObject({ ok: true });
+    expect(bobImport).toMatchObject({ ok: false, reason: 'rollback-incomplete' });
+    expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('Alice imported home');
+    expect(bob.getHomeAddress().name).toBe('Bob home');
+    expect(importJournalEntries().length).toBeGreaterThan(0);
+
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    expect(await StorageService.ensureLegacyMigratedAsync()).toMatchObject({ ok: true });
     expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('Alice original home');
+
+    const bobRetry = await bob.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'Bob backup', lat: 5, lng: 5 },
+    }));
+    expect(bobRetry).toMatchObject({ ok: true });
     expect(bob.getHomeAddress().name).toBe('Bob backup');
     expect(importJournalEntries()).toEqual([]);
   });
@@ -1931,6 +1943,36 @@ describe('namespaced browser storage', () => {
     const recovered = await bob.ensureLegacyMigratedAsync();
     expect(recovered).toMatchObject({ ok: true });
     expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('After');
+  });
+
+  test('committed journal does not resurrect data after the owner deletes it', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    const aliceHomeKey = authenticatedWorkingCopyKey(SESSION_A.user.id, WORKING_COPY_KEYS.HOME_ADDRESS);
+    const inner = globalThis.localStorage;
+    globalThis.localStorage = wrapLocalStorage(inner, {
+      removeItem(key, store) {
+        if (String(key).includes('import-journal')) throw storageError();
+        store.removeItem(key);
+      },
+    });
+    expect(importOk(await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+    })))).toBe(true);
+    expect(JSON.parse(importJournalEntries(inner)[0][1]).status).toBe('committed');
+    StorageService.clearHomeAddress();
+    expect(inner.getItem(aliceHomeKey)).toBeNull();
+
+    const bob = createStorageService();
+    bob.setOwner(SESSION_B.user.id, { migrate: false });
+    expect(await bob.ensureLegacyMigratedAsync()).toMatchObject({ ok: true });
+    expect(inner.getItem(aliceHomeKey)).toBeNull();
+
+    globalThis.localStorage = inner;
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    expect(await StorageService.ensureLegacyMigratedAsync()).toMatchObject({ ok: true });
+    expect(StorageService.getHomeAddress()).toBeNull();
   });
 
   test('throw after committed persist does not roll back intended values', async () => {

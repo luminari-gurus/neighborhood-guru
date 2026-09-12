@@ -898,29 +898,6 @@ function clearImportJournalFor(namespaceId) {
   return namespaced && globalOk;
 }
 
-/**
- * Re-apply a committed import. Never restore the pre-import snapshot.
- * Concurrent values that match neither snapshot nor intended are left in place.
- */
-function restoreCommittedIntended(snapshot, intended) {
-  let complete = true;
-  for (const [key, value] of Object.entries(intended)) {
-    const current = readItem(key);
-    if (current === value) continue;
-    const original = snapshot && Object.prototype.hasOwnProperty.call(snapshot, key)
-      ? snapshot[key]
-      : undefined;
-    if (current != null && current !== original && current !== value) continue;
-    try {
-      applyStoredValue(key, value);
-      if (readItem(key) !== value) complete = false;
-    } catch {
-      complete = false;
-    }
-  }
-  return complete;
-}
-
 function journalIntendedMap(journal) {
   const intended = journal?.intended && typeof journal.intended === 'object' && !Array.isArray(journal.intended)
     ? journal.intended
@@ -944,12 +921,8 @@ function recoverImportJournalAt(key) {
     : null;
   const intended = journalIntendedMap(journal);
   if (journal.status === 'committed') {
-    if (!intended) return { ok: false, reason: 'rollback-incomplete' };
-    if (!restoreCommittedIntended(snapshot, intended)) {
-      return { ok: false, reason: 'rollback-incomplete' };
-    }
     clearImportJournalAt(key);
-    return { ok: true, recovered: true };
+    return { ok: true, recovered: false };
   }
   if (journal.status !== 'pending' && journal.status !== 'rollback-incomplete') {
     return { ok: false, reason: 'rollback-incomplete' };
@@ -973,10 +946,12 @@ function recoverImportJournalAt(key) {
   return { ok: false, reason: 'rollback-incomplete' };
 }
 
-function recoverAllImportJournals() {
+function recoverImportJournalsFor(namespaceId) {
   let allOk = true;
   let recovered = false;
   for (const key of listImportJournalStorageKeys()) {
+    const journal = readImportJournalAt(key);
+    if (!journalBelongsToNamespace(journal, namespaceId)) continue;
     const result = recoverImportJournalAt(key);
     if (!result.ok) allOk = false;
     if (result.recovered) recovered = true;
@@ -1233,7 +1208,7 @@ export const StorageService = {
         runOwnerMismatchFailClosed();
         return importOutcome(false, 'owner-changed');
       }
-      const recovered = recoverAllImportJournals();
+      const recovered = recoverImportJournalsFor(liveNamespaceId);
       if (!recovered.ok) return importOutcome(false, 'rollback-incomplete');
       runExclusiveLegacyMigration(anonymous, ownerId);
       return { ok: true };
@@ -1604,9 +1579,12 @@ export const StorageService = {
    * Import neighborhood JSON into the namespace that initiated the call.
    * Owner/namespace are snapshotted before the Web Lock; a later owner flip
    * aborts without writing. A verified per-namespace journal is persisted
-   * before the first dest write. Rollback restores a key only if it still
-   * holds this import's write. Unresolved journals block later imports and
-   * are never cleared for another namespace.
+   * before the first dest write. After dest writes verify, the journal is
+   * marked `committed` before success is returned. Recovery never re-applies
+   * committed intended values, and executable recovery is scoped to the
+   * active namespace. Rollback restores a key only if it still holds this
+   * import's write. Unresolved journals block later imports and are never
+   * cleared for another namespace.
    */
   async importDataJSON(jsonStr) {
     let data;
@@ -1675,8 +1653,11 @@ export const StorageService = {
         ) {
           return importOutcome(false, 'owner-changed');
         }
-        const recovered = recoverAllImportJournals();
+        const recovered = recoverImportJournalsFor(ownerSnapshot.namespaceId);
         if (!recovered.ok) return importOutcome(false, 'rollback-incomplete');
+        if (hasForeignUnresolvedImportJournal(ownerSnapshot.namespaceId)) {
+          return importOutcome(false, 'rollback-incomplete');
+        }
         migrationInterleave('after-import-lock', { namespaceId: ownerSnapshot.namespaceId });
 
         const { anonymous, ownerId, namespaceId } = ownerSnapshot;
