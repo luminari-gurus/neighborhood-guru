@@ -1914,6 +1914,10 @@ describe('namespaced browser storage', () => {
     const journals = importJournalEntries(inner);
     expect(journals.length).toBeGreaterThan(0);
     expect(JSON.parse(journals[0][1]).status).toBe('committed');
+    expect(StorageService.legacyMigrationStatus()).toMatchObject({
+      importRollbackIncomplete: false,
+      foreignImportJournalUnresolved: false,
+    });
 
     const recovered = await StorageService.ensureLegacyMigratedAsync();
     expect(recovered).toMatchObject({ ok: true });
@@ -1943,6 +1947,15 @@ describe('namespaced browser storage', () => {
     const recovered = await bob.ensureLegacyMigratedAsync();
     expect(recovered).toMatchObject({ ok: true });
     expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('After');
+    expect(JSON.parse(importJournalEntries()[0][1]).status).toBe('committed');
+    expect(bob.legacyMigrationStatus()).toMatchObject({
+      importRollbackIncomplete: false,
+      foreignImportJournalUnresolved: false,
+    });
+    const ordinary = JSON.parse(bob.exportDeviceRecoveryJSON());
+    expect(ordinary.importJournals).toEqual([]);
+    expect(JSON.stringify(ordinary)).not.toContain('After');
+    expect(JSON.stringify(ordinary)).not.toContain('Before');
   });
 
   test('committed journal does not resurrect data after the owner deletes it', async () => {
@@ -1968,6 +1981,15 @@ describe('namespaced browser storage', () => {
     bob.setOwner(SESSION_B.user.id, { migrate: false });
     expect(await bob.ensureLegacyMigratedAsync()).toMatchObject({ ok: true });
     expect(inner.getItem(aliceHomeKey)).toBeNull();
+    expect(JSON.parse(importJournalEntries(inner)[0][1]).status).toBe('committed');
+    expect(bob.legacyMigrationStatus()).toMatchObject({
+      importRollbackIncomplete: false,
+      foreignImportJournalUnresolved: false,
+    });
+    const ordinary = JSON.parse(bob.exportDeviceRecoveryJSON());
+    expect(ordinary.importJournals).toEqual([]);
+    expect(JSON.stringify(ordinary)).not.toContain('After');
+    expect(JSON.stringify(ordinary)).not.toContain('Before');
 
     globalThis.localStorage = inner;
     StorageService.setOwner(SESSION_A.user.id, { migrate: false });
