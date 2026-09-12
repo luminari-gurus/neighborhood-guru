@@ -562,14 +562,7 @@ export class NeighborhoodGuruApp {
     });
 
     this.listen(el.clearHomeBtn, 'click', () => {
-      if (this.disposed) return;
-      if (confirm('Clear configured Home address? App will revert to Earth Globe view.')) {
-        this.storage.clearHomeAddress();
-        this.homeAddress = null;
-        this.ui.updateHomeHeaderStatus(null);
-        if (this.mapboxService.homeMarker) this.mapboxService.homeMarker.remove();
-        this.ui.showToast('Home address cleared', 'info');
-      }
+      this.handleClearHome();
     });
 
     // --- Key Prompt Modal & Warning Banner Handlers ---
@@ -633,27 +626,13 @@ export class NeighborhoodGuruApp {
       const namespaceId = this.storage.getNamespaceId();
       const reader = new FileReader();
       reader.onload = async (event) => {
-        if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
-        const result = await this.storage.importDataJSON(event.target.result);
-        if (this.disposed || !this.isCurrentGeneration(generation) || this.storage.getNamespaceId() !== namespaceId) return;
-        if (result?.ok) {
-          this.ui.showToast('Data imported successfully! Reloading...', 'success');
-          this.scheduleTimeout(() => window.location.reload(), 1000);
+        if (this.disposed) return;
+        if (!this.isSameOwnerGeneration(generation, namespaceId)) {
+          this.ui.showToast('Account changed before import finished. Nothing was written to the new account.', 'warning', 8000);
           return;
         }
-        const reason = result?.reason;
-        if (reason === 'lock-unavailable' || reason === 'lock-rejected') {
-          this.ui.showToast('Import needs a browser storage lock. Try again, or use a browser that supports Web Locks.', 'warning', 8000);
-        } else if (reason === 'owner-changed') {
-          this.ui.showToast('Account changed before import finished. Nothing was written to the new account.', 'warning', 8000);
-        } else if (reason === 'rollback-incomplete') {
-          this.ui.showToast('Import did not finish and could not fully undo. Download device recovery and review storage before continuing.', 'error', 10000);
-          this.refreshLegacyRecovery();
-        } else if (reason === 'invalid-document') {
-          this.ui.showToast('Failed to import JSON file. Invalid format.', 'error');
-        } else {
-          this.ui.showToast('Failed to import neighborhood data.', 'error');
-        }
+        const result = await this.storage.importDataJSON(event.target.result);
+        this.reportImportOutcome(result, generation, namespaceId);
       };
       reader.readAsText(file);
     });
@@ -1036,7 +1015,68 @@ export class NeighborhoodGuruApp {
   }
 
   /**
-   * Delete Location Form Handler
+   * Clear Home. Generation + namespace are captured before `confirm()` so a
+   * switch during the dialog cannot clear the replacement owner's home.
+   */
+  handleClearHome() {
+    if (this.disposed) return;
+    const generation = this.neighborhoodGeneration;
+    const namespaceId = this.storage.getNamespaceId();
+    const confirmed = typeof globalThis.confirm === 'function'
+      ? globalThis.confirm('Clear configured Home address? App will revert to Earth Globe view.')
+      : true;
+    if (!confirmed) return;
+    if (this.disposed || !this.isSameOwnerGeneration(generation, namespaceId)) {
+      this.ui.showToast?.('Account changed. Home was not cleared.', 'error');
+      return;
+    }
+    this.storage.clearHomeAddress();
+    this.homeAddress = null;
+    this.ui.updateHomeHeaderStatus(null);
+    if (this.mapboxService.homeMarker) this.mapboxService.homeMarker.remove();
+    this.ui.showToast('Home address cleared', 'info');
+  }
+
+  /**
+   * Report a typed import outcome even if the owner flipped after FileReader
+   * or while the mutation lock was queued. Lock failures keep their own copy.
+   */
+  reportImportOutcome(result, generation, namespaceId) {
+    if (this.disposed) return;
+    if (result?.ok) {
+      if (!this.isSameOwnerGeneration(generation, namespaceId)) {
+        this.ui.showToast('Account changed before import finished. Nothing was written to the new account.', 'warning', 8000);
+        return;
+      }
+      this.ui.showToast('Data imported successfully! Reloading...', 'success');
+      this.scheduleTimeout(() => window.location.reload(), 1000);
+      return;
+    }
+    const reason = result?.reason;
+    if (reason === 'lock-unavailable' || reason === 'lock-rejected') {
+      this.ui.showToast('Import needs a browser storage lock. Try again, or use a browser that supports Web Locks.', 'warning', 8000);
+      return;
+    }
+    if (reason === 'owner-changed' || !this.isSameOwnerGeneration(generation, namespaceId)) {
+      this.ui.showToast('Account changed before import finished. Nothing was written to the new account.', 'warning', 8000);
+      return;
+    }
+    if (reason === 'rollback-incomplete') {
+      this.ui.showToast('Import did not finish and could not fully undo. Download device recovery and review storage before continuing.', 'error', 10000);
+      this.refreshLegacyRecovery();
+      return;
+    }
+    if (reason === 'invalid-document') {
+      this.ui.showToast('Failed to import JSON file. Invalid format.', 'error');
+      return;
+    }
+    this.ui.showToast('Failed to import neighborhood data.', 'error');
+  }
+
+  /**
+   * Delete Location Form Handler. Generation, namespace, and editor stamp are
+   * captured before `confirm()` so a colliding id (e.g. `demo-1`) cannot be
+   * deleted from the replacement owner after OK.
    */
   handleDeleteLocation() {
     if (this.disposed) {
@@ -1050,18 +1090,32 @@ export class NeighborhoodGuruApp {
     }
     const el = this.ui.elements;
     const id = el.formLocationId.value;
-    if (id && confirm('Are you sure you want to delete this location contact?')) {
-      this.savedPlaces = this.storage.deletePlace(id);
-      this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
-      this.ui.renderPlacesList(
-        this.savedPlaces,
-        (place) => this.onPlaceSelected(place),
-        (place) => this.openLocationEditor(place)
-      );
-      this.closeLocationEditor();
-      this.mapboxService.clearTempMarker();
-      this.ui.showToast('Location deleted', 'info');
+    if (!id) return;
+
+    const generation = this.neighborhoodGeneration;
+    const namespaceId = this.storage.getNamespaceId();
+    const editorRevision = this.editorRevision;
+    const confirmed = typeof globalThis.confirm === 'function'
+      ? globalThis.confirm('Are you sure you want to delete this location contact?')
+      : true;
+    if (!confirmed) return;
+    if (this.disposed
+      || !this.isSameOwnerGeneration(generation, namespaceId)
+      || !this.editorMatchesCurrentRequest(editorRevision)) {
+      this.ui.showToast?.('Account changed. That location was not deleted.', 'error');
+      return;
     }
+
+    this.savedPlaces = this.storage.deletePlace(id);
+    this.mapboxService.renderSavedMarkers(this.savedPlaces, (place) => this.openLocationEditor(place));
+    this.ui.renderPlacesList(
+      this.savedPlaces,
+      (place) => this.onPlaceSelected(place),
+      (place) => this.openLocationEditor(place)
+    );
+    this.closeLocationEditor();
+    this.mapboxService.clearTempMarker();
+    this.ui.showToast('Location deleted', 'info');
   }
 
   /**

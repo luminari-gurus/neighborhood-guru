@@ -13,6 +13,7 @@ import {
 
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = globalThis.localStorage;
+const originalConfirm = globalThis.confirm;
 const originalSearchVenues = JamBaseService.searchVenues;
 const originalFetchVenueDetails = JamBaseService.fetchVenueDetails;
 const originalFetchNearbyPois = OverpassService.fetchNearbyPois;
@@ -259,6 +260,7 @@ describe('owner-switch presentation isolation', () => {
     StorageService.setOwner(null);
     globalThis.localStorage = originalLocalStorage;
     globalThis.navigator = originalNavigator;
+    globalThis.confirm = originalConfirm;
     JamBaseService.searchVenues = originalSearchVenues;
     JamBaseService.fetchVenueDetails = originalFetchVenueDetails;
     OverpassService.fetchNearbyPois = originalFetchNearbyPois;
@@ -624,6 +626,62 @@ describe('owner-switch presentation isolation', () => {
     expect(StorageService.getSavedPlaces().some((place) => place.notes === PLACE_A.notes)).toBe(true);
     StorageService.setOwner(SESSION_B.user.id);
     expect(StorageService.getSavedPlaces().some((place) => place.notes === 'bob notes')).toBe(true);
+
+    app.dispose();
+  });
+
+  test('Clear Home confirm does not clear the replacement owner home', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Alice home', lat: 1, lng: 1 });
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Bob home', lat: 2, lng: 2 });
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+
+    const ui = createStubUi();
+    const { app, client } = await createBoundApp({ ui, session: SESSION_A });
+    globalThis.confirm = () => {
+      client.setSession(SESSION_B);
+      return true;
+    };
+
+    app.handleClearHome();
+
+    expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+    expect(StorageService.getHomeAddress()?.name).toBe('Bob home');
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    expect(StorageService.getHomeAddress()?.name).toBe('Alice home');
+    expect(ui.toasts.some((message) => /not cleared/i.test(String(message)))).toBe(true);
+
+    app.dispose();
+  });
+
+  test('Delete Location confirm does not delete a colliding demo id in the replacement owner', async () => {
+    StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+    expect(StorageService.getSavedPlaces().some((place) => place.id === 'demo-1')).toBe(true);
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    expect(StorageService.getSavedPlaces().some((place) => place.id === 'demo-1')).toBe(true);
+
+    const ui = createStubUi();
+    const { app, client } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({
+      id: 'demo-1',
+      name: 'Oak Street Bakery & Cafe',
+      lat: 37.7749,
+      lng: -122.4194,
+    });
+    ui.elements.formLocationId.value = 'demo-1';
+    globalThis.confirm = () => {
+      client.setSession(SESSION_B);
+      return true;
+    };
+
+    app.handleDeleteLocation();
+
+    expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+    expect(StorageService.getSavedPlaces().some((place) => place.id === 'demo-1')).toBe(true);
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    expect(StorageService.getSavedPlaces().some((place) => place.id === 'demo-1')).toBe(true);
+    expect(ui.toasts.some((message) => /not deleted/i.test(String(message)))).toBe(true);
 
     app.dispose();
   });
@@ -1614,6 +1672,69 @@ describe('owner-switch presentation isolation', () => {
       expect(ui.toasts.some((message) => String(message).toLowerCase().includes('lock'))).toBe(true);
     } finally {
       globalThis.FileReader = originalFileReader;
+    }
+  });
+
+  test('queued import owner change shows a toast and does not write the new account', async () => {
+    const locks = installHoldableWebLocks();
+    const originalFileReader = globalThis.FileReader;
+    globalThis.FileReader = class FakeFileReader {
+      readAsText() {
+        queueMicrotask(() => {
+          this.onload?.({
+            target: {
+              result: JSON.stringify({
+                version: 1,
+                homeAddress: { name: 'Alice backup', lat: 2, lng: 2 },
+              }),
+            },
+          });
+        });
+      }
+    };
+    const ui = createStubUi();
+    let changeHandler = null;
+    ui.elements.importFileInput = {
+      addEventListener(type, handler) {
+        if (type === 'change') changeHandler = handler;
+      },
+      removeEventListener() {},
+    };
+    try {
+      StorageService.setOwner(SESSION_B.user.id, { migrate: false });
+      StorageService.setHomeAddress({ name: 'Bob home', lat: 3, lng: 3 });
+      StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+      StorageService.setHomeAddress({ name: 'Alice current', lat: 1, lng: 1 });
+
+      const { app, auth } = await createBoundApp({ ui, session: SESSION_A });
+      app.bindEvents();
+      expect(changeHandler).toBeTypeOf('function');
+
+      locks.hold();
+      changeHandler({ target: { files: [{ name: 'backup.json' }] } });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(locks.pendingCount()).toBeGreaterThan(0);
+
+      await auth.signIn({ session: SESSION_B });
+      expect(StorageService.getOwnerId()).toBe(SESSION_B.user.id);
+
+      locks.releaseAll();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(StorageService.getHomeAddress()?.name).toBe('Bob home');
+      StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+      expect(StorageService.getHomeAddress()?.name).toBe('Alice current');
+      expect(ui.toasts.some((message) => /account changed/i.test(String(message)))).toBe(true);
+      expect(ui.toasts.some((message) => String(message).includes('Invalid format'))).toBe(false);
+
+      app.dispose();
+    } finally {
+      globalThis.FileReader = originalFileReader;
+      globalThis.navigator = locks.previous;
     }
   });
 
