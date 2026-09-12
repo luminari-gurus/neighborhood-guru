@@ -1751,6 +1751,11 @@ export const StorageService = {
           clearImportJournalFor(namespaceId);
           return { ok: true };
         } catch (e) {
+          const storedJournal = readImportJournalAt(importJournalKeyFor(namespaceId));
+          if (storedJournal && storedJournal.status === 'committed') {
+            clearImportJournalFor(namespaceId);
+            return { ok: true };
+          }
           const rolled = restoreWrittenKeysIfUnchanged(journal.snapshot, attempted);
           if (rolled && storageMatchesSnapshot(journal.snapshot, attempted)) {
             clearImportJournalFor(namespaceId);

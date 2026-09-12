@@ -1933,6 +1933,20 @@ describe('namespaced browser storage', () => {
     expect(JSON.parse(localStorage.getItem(aliceHomeKey)).name).toBe('After');
   });
 
+  test('throw after committed persist does not roll back intended values', async () => {
+    StorageService.setOwner(SESSION_A.user.id, { migrate: false });
+    StorageService.setHomeAddress({ name: 'Before', lat: 1, lng: 1 });
+    globalThis.__NG_MIGRATION_INTERLEAVE__ = (phase) => {
+      if (phase === 'after-import-committed') throw new Error('after-commit-throw');
+    };
+    const result = await StorageService.importDataJSON(JSON.stringify({
+      version: 1,
+      homeAddress: { name: 'After', lat: 2, lng: 2 },
+    }));
+    expect(result).toMatchObject({ ok: true });
+    expect(StorageService.getHomeAddress().name).toBe('After');
+  });
+
   test('ordinary device recovery does not export another account import journal', async () => {
     StorageService.setOwner(SESSION_A.user.id, { migrate: false });
     StorageService.setHomeAddress({ name: 'Alice original home', lat: 1, lng: 1 });
