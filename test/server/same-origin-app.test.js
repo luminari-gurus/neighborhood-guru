@@ -64,6 +64,7 @@ describe('same-origin app and HTTP AuthClient', () => {
     expect(await proxied.json()).toEqual({ events: [] });
     expect(upstream[0][0]).toBe('https://api.data.jambase.com/v3/events?venueName=Fillmore');
     expect(upstream[0][1].headers.Authorization).toBe('Bearer jbd_test');
+    expect(upstream[0][1].headers['User-Agent']).toContain('NeighborhoodGuru/1.0');
     backend.close();
   });
 });
