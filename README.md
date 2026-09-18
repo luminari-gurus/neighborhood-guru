@@ -134,7 +134,7 @@ bun run server
 bun run dev
 ```
 
-Vite proxies `/api/auth` to `AUTH_DEV_SERVER` (default `http://localhost:3000`) and, when `AUTH_MODE` is `optional` or `required`, replaces the static runtime marker (`globalThis.__NG_RUNTIME_CONFIG__={authMode:\"disabled\"};`) with JSON `{ authMode }` so the HTTP AuthClient is enabled. Without those modes, `bun run dev` keeps the static disabled default.
+Vite proxies `/api/auth` to `AUTH_DEV_SERVER` (default `http://localhost:3000`) and, when `AUTH_MODE` is `optional` or `required`, replaces the static runtime marker (`globalThis.__NG_RUNTIME_CONFIG__={authMode:"disabled"};`) with JSON `{ authMode }` so the HTTP AuthClient is enabled. Without those modes, `bun run dev` keeps the static disabled default.
 
 The production server injects only `{ authMode }` into the built HTML. Database paths, `AUTH_SECRET`, provider credentials, and deployment-specific values are never browser configuration.
 
@@ -170,7 +170,7 @@ neighborhood-guru/
 └── README.md
 ```
 
-Design notes live under [docs/](docs/README.md). Architecture Decision Records are listed in [docs/adr](docs/adr/README.md).
+Design notes live under [docs/](docs/README.md). Architecture Decision Records are listed in [docs/adr/](docs/adr/README.md).
 
 ---
 
