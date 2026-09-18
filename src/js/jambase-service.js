@@ -221,7 +221,8 @@ export class JamBaseService {
     const street = [address.streetAddress, city, state].filter(Boolean).join(', ');
     const capacity = venue.maximumAttendeeCapacity || venue.capacity || '';
     return {
-      id: identifier || slug || this._normalizeVenueText(venue.name || fallbackName),
+      id: slug || identifier || this._normalizeVenueText(venue.name || fallbackName),
+      apiVenueId: identifier,
       name: venue.name || fallbackName,
       city,
       state,
@@ -250,7 +251,15 @@ export class JamBaseService {
         const venues = this._venueListFromPayload(result.data)
           .map((venue) => this._mapSearchedVenue(venue, cleanQuery))
           .filter((venue) => venue.id);
-        if (venues.length > 0) return venues;
+        if (venues.length > 0) {
+          venues.forEach((venue) => {
+            const cacheKey = this.extractVenueId(venue.id);
+            if (cacheKey && venue.apiVenueId) {
+              this.setResolvedVenueId(cacheKey, venue.apiVenueId);
+            }
+          });
+          return venues;
+        }
       }
     }
 
@@ -507,7 +516,7 @@ export class JamBaseService {
     let apiFailureReason = null;
 
     if (apiKey) {
-      let sawSuccessfulApi = false;
+      let venueSearchReturnedNoResolvableVenue = false;
       const venueName = this._venueNameFromId(cleanId);
       const venueSlug = (/^jambase:\d+$/i.test(cleanId) || /^\d+$/.test(cleanId)) ? null : cleanId;
       let venueId = this.getResolvedVenueId(cleanId)
@@ -536,7 +545,6 @@ export class JamBaseService {
           apiFailureReason = 'error';
           return null;
         }
-        sawSuccessfulApi = true;
         return rawEvents;
       };
 
@@ -554,7 +562,6 @@ export class JamBaseService {
           if (venueSearch.failureReason) {
             apiFailureReason = venueSearch.failureReason;
           } else {
-            sawSuccessfulApi = true;
             const venues = this._venueListFromPayload(venueSearch.data);
             const match = this._pickVenueMatch(venues, { name: venueName, slug: venueSlug });
             const resolvedId = this._venueIdentifier(match);
@@ -563,12 +570,14 @@ export class JamBaseService {
               venueId = resolvedId;
               const byResolved = await tryEventsQuery(`venueId=${encodeURIComponent(resolvedId)}`);
               if (byResolved) return acceptEvents(byResolved);
+            } else if (!venueId) {
+              venueSearchReturnedNoResolvableVenue = true;
             }
           }
         }
       }
 
-      if (sawSuccessfulApi) {
+      if (venueSearchReturnedNoResolvableVenue) {
         this.setCachedShows(cleanId, []);
         return [];
       }
