@@ -489,7 +489,7 @@ export class JamBaseService {
 
   /**
    * Fetch upcoming concert schedule from JamBase Data API v3, with HTML scraper fallback.
-   * Empty API results are a successful \"no upcoming shows\" — not a reason to scrape.
+   * Empty API results are a successful "no upcoming shows" — not a reason to scrape.
    */
   static async fetchUpcomingShows(jambaseId, forceRefresh = false) {
     if (!jambaseId) return [];
@@ -517,7 +517,7 @@ export class JamBaseService {
       const acceptEvents = (rawEvents) => {
         const finalShows = this._mapApiEvents(rawEvents, cleanId).slice(0, 5);
         if (finalShows.length) {
-          console.log('\u2713 JamBase Data API v3 shows loaded:', finalShows);
+          console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
         }
         this.setCachedShows(cleanId, finalShows);
         return finalShows;
@@ -593,11 +593,12 @@ export class JamBaseService {
         const todayStr = new Date().toDateString();
         const events = [];
 
-        const jsonLdMatches = htmlText.match(/<script type=\"application\\/ld\\+json\">([\\s\\S]*?)<\\/script>/gi);
+        // 1. Parse JSON-LD microdata script tags (<script type="application/ld+json">)
+        const jsonLdMatches = htmlText.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi);
         if (jsonLdMatches) {
           jsonLdMatches.forEach(scriptTag => {
             try {
-              const jsonContent = scriptTag.replace(/<script[^>]*>/i, '').replace(/<\\/script>/i, '');
+              const jsonContent = scriptTag.replace(/<script[^>]*>/i, '').replace(/<\/script>/i, '');
               const parsed = JSON.parse(jsonContent);
               const itemList = Array.isArray(parsed) ? parsed : [parsed];
 
@@ -628,12 +629,14 @@ export class JamBaseService {
                 });
               });
             } catch (e) {
+              // Ignore invalid JSON-LD scripts
             }
           });
         }
 
+        // 2. Parse HTML event item fallback if JSON-LD tag was not present
         if (events.length === 0) {
-          const showItemRegex = /class=\"[^\"]*event-card[^\"]*\"[\\s\\S]*?<a[^>]*href=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/a>[\\s\\S]*?<time[^>]*datetime=\"([^\"]*)\"[^>]*>/gi;
+          const showItemRegex = /class="[^"]*event-card[^"]*"[\s\S]*?<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<time[^>]*datetime="([^"]*)"[^>]*>/gi;
           let match;
           while ((match = showItemRegex.exec(htmlText)) !== null) {
             const showTitle = match[2].replace(/<[^>]+>/g, '').trim();
@@ -642,7 +645,7 @@ export class JamBaseService {
               events.push({
                 title: showTitle,
                 date: showDate ? showDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' }) : 'Upcoming',
-                time: showDate ? showDate.toLocaleTimeString('en-US', { month: 'short', day: 'numeric' }) : '',
+                time: showDate ? showDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
                 isToday: showDate ? showDate.toDateString() === todayStr : false,
                 url: match[1].startsWith('http') ? match[1] : `https://www.jambase.com${match[1]}`,
               });
