@@ -26,8 +26,11 @@ export default defineConfig(({ command, mode }) => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api-jambase/, ''),
           configure: (proxy) => {
-            proxy.on('proxyReq', (proxyReq) => {
-              proxyReq.setHeader('User-Agent', 'NeighborhoodGuru/1.0');
+            proxy.on('proxyReq', (proxyReq, req) => {
+              proxyReq.setHeader('User-Agent', 'NeighborhoodGuru/1.0 (+https://github.com/luminari-gurus/neighborhood-guru)');
+              proxyReq.setHeader('Accept', 'application/json');
+              const auth = req.headers.authorization;
+              if (auth) proxyReq.setHeader('Authorization', auth);
             });
           },
         },

@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api-jambase/v3/:path*",
+      "destination": "/api/jambase/:path*"
+    }
+  ]
+}

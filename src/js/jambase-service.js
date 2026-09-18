@@ -40,9 +40,12 @@ export class JamBaseService {
 
   /**
    * Convert a stored venue slug/URL/id into a JamBase Data API venueId (jambase:12345).
-   * Numeric IDs and slugs that end in digits (e.g. the-fillmore-15421) are supported.
+   * Numeric IDs, `jambase:` prefixes, and slugs that end in digits (e.g. the-fillmore-15421) are supported.
    */
   static toJamBaseVenueId(inputStr) {
+    if (!inputStr) return null;
+    const prefixed = String(inputStr).trim().match(/jambase:(\d+)/i);
+    if (prefixed) return `jambase:${prefixed[1]}`;
     const cleanId = this.extractVenueId(inputStr);
     if (!cleanId) return null;
     if (/^\d+$/.test(cleanId)) return `jambase:${cleanId}`;
@@ -60,7 +63,9 @@ export class JamBaseService {
       const keysToRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key && key.startsWith('guru_jb_shows_')) keysToRemove.push(key);
+        if (key && (key.startsWith('guru_jb_shows_') || key.startsWith('guru_jb_venueid_'))) {
+          keysToRemove.push(key);
+        }
       }
       keysToRemove.forEach((key) => localStorage.removeItem(key));
     } catch (e) {
@@ -71,10 +76,14 @@ export class JamBaseService {
   /**
    * Extract JamBase venue ID or slug from a raw ID or full JamBase URL
    * e.g. "https://www.jambase.com/venue/soundcheck-studios" -> "soundcheck-studios"
+   * e.g. "jambase:62108" stays "jambase:62108"
    */
   static extractVenueId(inputStr) {
     if (!inputStr) return '';
     const trimmed = String(inputStr).trim();
+
+    const prefixed = trimmed.match(/^jambase:(\d+)$/i);
+    if (prefixed) return `jambase:${prefixed[1]}`;
 
     // Check if full JamBase URL was pasted
     const urlMatch = trimmed.match(/jambase\.com\/venue\/([^\s?#]+)/i);
@@ -82,8 +91,8 @@ export class JamBaseService {
       return urlMatch[1].replace(/\/$/, '');
     }
 
-    // Clean input slug/ID
-    return trimmed.replace(/[^\w-]/g, '');
+    // Clean input slug/ID (allow colon so jambase:123 survives if it appears mid-string)
+    return trimmed.replace(/[^\w:-]/g, '');
   }
 
   /**
@@ -132,6 +141,98 @@ export class JamBaseService {
     return { city, state };
   }
 
+  static _venueNameFromId(cleanId) {
+    if (!cleanId) return '';
+    if (/^jambase:\d+$/i.test(cleanId)) return '';
+    return cleanId.replace(/^jambase:/i, '').replace(/-/g, ' ').trim();
+  }
+
+  static getResolvedVenueId(cleanId) {
+    try {
+      return localStorage.getItem(`guru_jb_venueid_${cleanId}`) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  static setResolvedVenueId(cleanId, venueId) {
+    if (!cleanId || !venueId) return;
+    try {
+      localStorage.setItem(`guru_jb_venueid_${cleanId}`, venueId);
+    } catch (e) {
+      console.warn('Venue ID cache write error:', e);
+    }
+  }
+
+  static _venueIdentifier(venue) {
+    if (!venue) return null;
+    const raw = venue.identifier || venue.id || null;
+    if (!raw) return null;
+    const value = String(raw);
+    const prefixed = value.match(/jambase:(\d+)/i);
+    if (prefixed) return `jambase:${prefixed[1]}`;
+    if (/^\d+$/.test(value)) return `jambase:${value}`;
+    return this.toJamBaseVenueId(value);
+  }
+
+  static _venueSlugFromRecord(venue) {
+    if (!venue) return null;
+    if (venue.slug) return String(venue.slug);
+    const url = venue.url || venue['@id'] || '';
+    const match = String(url).match(/jambase\.com\/venue\/([^\s?#/]+)/i);
+    return match ? match[1].replace(/\/$/, '') : null;
+  }
+
+  static _normalizeVenueText(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  }
+
+  static _pickVenueMatch(venues, { name, slug, city } = {}) {
+    if (!Array.isArray(venues) || venues.length === 0) return null;
+    const slugNorm = this._normalizeVenueText(slug);
+    const nameNorm = this._normalizeVenueText(name);
+    const cityNorm = this._normalizeVenueText(city);
+
+    const bySlug = slugNorm
+      ? venues.find((venue) => this._normalizeVenueText(this._venueSlugFromRecord(venue)) === slugNorm)
+      : null;
+    if (bySlug) return bySlug;
+
+    const named = nameNorm
+      ? venues.filter((venue) => this._normalizeVenueText(venue.name) === nameNorm)
+      : [];
+    if (cityNorm && named.length > 1) {
+      const cityHit = named.find((venue) => {
+        const locality = venue.address?.addressLocality || venue.city || '';
+        return this._normalizeVenueText(locality) === cityNorm;
+      });
+      if (cityHit) return cityHit;
+    }
+    if (named.length) return named[0];
+    return venues.find((venue) => this._venueIdentifier(venue)) || venues[0] || null;
+  }
+
+  static _mapSearchedVenue(venue, fallbackName) {
+    const identifier = this._venueIdentifier(venue);
+    const slug = this._venueSlugFromRecord(venue);
+    const address = venue.address || {};
+    const city = address.addressLocality || venue.city || '';
+    const state = address.addressRegion || venue.state || '';
+    const street = [address.streetAddress, city, state].filter(Boolean).join(', ');
+    const capacity = venue.maximumAttendeeCapacity || venue.capacity || '';
+    return {
+      id: slug || identifier || this._normalizeVenueText(venue.name || fallbackName),
+      apiVenueId: identifier,
+      name: venue.name || fallbackName,
+      city,
+      state,
+      address: street,
+      type: venue['@type'] || 'Venue',
+      url: venue.url || (slug ? `https://www.jambase.com/venue/${slug}` : 'https://www.jambase.com'),
+      capacity: capacity ? String(capacity) : '',
+    };
+  }
+
   /**
    * Search JamBase for venue matching query, enriched with clean city & state metadata
    */
@@ -140,10 +241,32 @@ export class JamBaseService {
     const cleanQuery = query.trim();
     const primarySlug = cleanQuery.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-');
 
+    const apiKey = StorageService.getJambaseToken();
+    if (apiKey) {
+      const result = await this._fetchJamBaseApi(
+        `/venues?venueName=${encodeURIComponent(cleanQuery)}&perPage=6`,
+        apiKey
+      );
+      if (!result.failureReason) {
+        const venues = this._venueListFromPayload(result.data)
+          .map((venue) => this._mapSearchedVenue(venue, cleanQuery))
+          .filter((venue) => venue.id);
+        if (venues.length > 0) {
+          venues.forEach((venue) => {
+            const cacheKey = this.extractVenueId(venue.id);
+            if (cacheKey && venue.apiVenueId) {
+              this.setResolvedVenueId(cacheKey, venue.apiVenueId);
+            }
+          });
+          return venues;
+        }
+      }
+    }
+
     const results = [];
     const usedSlugs = new Set();
 
-    // 1. Query MusicBrainz Place API for real-world venue metadata
+    // Query MusicBrainz Place API for real-world venue metadata when JamBase search is unavailable.
     try {
       const mbUrl = `https://musicbrainz.org/ws/2/place?query=place:${encodeURIComponent(cleanQuery)}&fmt=json&limit=6`;
       const mbRes = await fetch(mbUrl, { headers: { 'User-Agent': 'NeighborhoodGuruApp/1.0' } });
@@ -204,6 +327,17 @@ export class JamBaseService {
     const cleanId = this.extractVenueId(jambaseId);
     if (!cleanId) return null;
 
+    const apiKey = StorageService.getJambaseToken();
+    const venueId = this.getResolvedVenueId(cleanId) || this.toJamBaseVenueId(jambaseId) || this.toJamBaseVenueId(cleanId);
+    if (apiKey && venueId) {
+      const result = await this._fetchJamBaseApi(`/venues/id/${encodeURIComponent(venueId)}`, apiKey);
+      if (!result.failureReason && result.data) {
+        const venue = Array.isArray(result.data) ? result.data[0] : (result.data.venue || result.data);
+        const capacity = venue?.maximumAttendeeCapacity || venue?.capacity;
+        if (capacity) return { capacity: String(capacity).replace(/,/g, '') };
+      }
+    }
+
     try {
       const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
       const proxyUrls = [
@@ -262,8 +396,10 @@ export class JamBaseService {
   /**
    * Same-origin GET against the JamBase Data API v3 proxy.
    * Returns { data } on success or { failureReason, status }.
+   * 429 honors Retry-After (capped) and 5xx retries with backoff so a brief
+   * gateway blip does not dump venue schedules onto the HTML scraper.
    */
-  static async _fetchJamBaseApi(pathWithQuery, apiKey) {
+  static async _fetchJamBaseApi(pathWithQuery, apiKey, { retries = 2 } = {}) {
     const path = pathWithQuery.startsWith('/') ? pathWithQuery : `/${pathWithQuery}`;
     const url = `${this.API_PROXY_BASE}${path}`;
     try {
@@ -278,7 +414,15 @@ export class JamBaseService {
         return { failureReason: 'auth', status: res.status };
       }
       if (res.status === 429) {
+        if (retries > 0) {
+          await this._sleep(this._retryDelayMs(res));
+          return this._fetchJamBaseApi(pathWithQuery, apiKey, { retries: retries - 1 });
+        }
         return { failureReason: 'rate_limit', status: res.status };
+      }
+      if (res.status >= 500 && retries > 0) {
+        await this._sleep(this._retryDelayMs(res, 400));
+        return this._fetchJamBaseApi(pathWithQuery, apiKey, { retries: retries - 1 });
       }
       if (!res.ok) {
         return { failureReason: 'error', status: res.status };
@@ -301,10 +445,24 @@ export class JamBaseService {
     }
   }
 
+  static _sleep(ms) {
+    const delay = Number(ms);
+    if (!delay || delay < 0) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, delay));
+  }
+
+  static _retryDelayMs(res, fallbackMs = 1000) {
+    const ra = res?.headers?.get?.('Retry-After');
+    if (ra && /^\d+$/.test(String(ra).trim())) {
+      return Math.min(Number(ra.trim()) * 1000, 2000);
+    }
+    return fallbackMs;
+  }
+
   static _eventListFromPayload(data) {
     if (!data) return null;
     if (Array.isArray(data)) return data;
-    const raw = data.events || data.records || data.data || null;
+    const raw = data.events || data.event || data.records || data.data || null;
     return Array.isArray(raw) ? raw : null;
   }
 
@@ -340,6 +498,7 @@ export class JamBaseService {
 
   /**
    * Fetch upcoming concert schedule from JamBase Data API v3, with HTML scraper fallback.
+   * Empty API results are a successful "no upcoming shows" — not a reason to scrape.
    */
   static async fetchUpcomingShows(jambaseId, forceRefresh = false) {
     if (!jambaseId) return [];
@@ -357,8 +516,23 @@ export class JamBaseService {
     let apiFailureReason = null;
 
     if (apiKey) {
-      const venueName = cleanId.replace(/-/g, ' ');
-      const venueId = this.toJamBaseVenueId(cleanId);
+      let venueSearchReturnedNoResolvableVenue = false;
+      const venueName = this._venueNameFromId(cleanId);
+      const venueSlug = (/^jambase:\d+$/i.test(cleanId) || /^\d+$/.test(cleanId)) ? null : cleanId;
+      let venueId = this.getResolvedVenueId(cleanId)
+        || this.toJamBaseVenueId(jambaseId)
+        || this.toJamBaseVenueId(cleanId);
+
+      const acceptEvents = (rawEvents) => {
+        const finalShows = this._mapApiEvents(rawEvents, cleanId).slice(0, 5);
+        if (finalShows.length) {
+          console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
+        }
+        this.setCachedShows(cleanId, finalShows);
+        return finalShows;
+      };
+
+      const canContinue = () => apiFailureReason !== 'auth' && apiFailureReason !== 'rate_limit';
 
       const tryEventsQuery = async (query) => {
         const result = await this._fetchJamBaseApi(`/events?${query}&perPage=5`, apiKey);
@@ -367,44 +541,45 @@ export class JamBaseService {
           return null;
         }
         const rawEvents = this._eventListFromPayload(result.data);
-        if (rawEvents && rawEvents.length > 0) {
-          const finalShows = this._mapApiEvents(rawEvents, cleanId).slice(0, 5);
-          console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
-          this.setCachedShows(cleanId, finalShows);
-          return finalShows;
+        if (!rawEvents) {
+          apiFailureReason = 'error';
+          return null;
         }
-        if (!apiFailureReason) apiFailureReason = 'no_results';
-        return null;
+        return rawEvents;
       };
 
-      if (venueId) {
+      if (venueId && canContinue()) {
         const byId = await tryEventsQuery(`venueId=${encodeURIComponent(venueId)}`);
-        if (byId) return byId;
+        if (byId) return acceptEvents(byId);
       }
 
-      if (apiFailureReason !== 'auth' && apiFailureReason !== 'rate_limit') {
-        const byName = await tryEventsQuery(`venueName=${encodeURIComponent(venueName)}`);
-        if (byName) return byName;
-      }
-
-      if (apiFailureReason !== 'auth' && apiFailureReason !== 'rate_limit') {
-        const venueSearch = await this._fetchJamBaseApi(
-          `/venues?venueName=${encodeURIComponent(venueName)}&perPage=5`,
-          apiKey
-        );
-        if (venueSearch.failureReason) {
-          apiFailureReason = venueSearch.failureReason;
-        } else {
-          const venues = this._venueListFromPayload(venueSearch.data);
-          const match = venues.find((v) => v && (v.identifier || v.id));
-          const resolvedId = match?.identifier || match?.id;
-          if (resolvedId) {
-            const byResolved = await tryEventsQuery(`venueId=${encodeURIComponent(resolvedId)}`);
-            if (byResolved) return byResolved;
-          } else if (!apiFailureReason) {
-            apiFailureReason = 'no_results';
+      if (canContinue()) {
+        const venueQuery = venueName
+          ? `/venues?venueName=${encodeURIComponent(venueName)}&perPage=5`
+          : null;
+        if (venueQuery) {
+          const venueSearch = await this._fetchJamBaseApi(venueQuery, apiKey);
+          if (venueSearch.failureReason) {
+            apiFailureReason = venueSearch.failureReason;
+          } else {
+            const venues = this._venueListFromPayload(venueSearch.data);
+            const match = this._pickVenueMatch(venues, { name: venueName, slug: venueSlug });
+            const resolvedId = this._venueIdentifier(match);
+            if (resolvedId) {
+              this.setResolvedVenueId(cleanId, resolvedId);
+              venueId = resolvedId;
+              const byResolved = await tryEventsQuery(`venueId=${encodeURIComponent(resolvedId)}`);
+              if (byResolved) return acceptEvents(byResolved);
+            } else if (!venueId) {
+              venueSearchReturnedNoResolvableVenue = true;
+            }
           }
         }
+      }
+
+      if (venueSearchReturnedNoResolvableVenue) {
+        this.setCachedShows(cleanId, []);
+        return [];
       }
 
       console.warn('JamBase Data API unavailable, using HTML scraper fallback:', apiFailureReason || 'error');

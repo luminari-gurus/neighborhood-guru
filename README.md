@@ -14,10 +14,12 @@
 - 📍 **Local Contacts & People Management**: Store neighborhood locations, households, trade services, and favorite spots with custom marker colors and contact info.
 - 📅 **Recurring Schedules & Events**: Track weekly recurring events (e.g. Friday Farmer's Markets, daily coffee meetups) with automatic **"Happening Today"** highlighting.
 - 🎭 **JamBase Venue Integration & Live Concerts**:
-  - Direct integration with **JamBase Data API v3** and live venue microdata.
-  - Asynchronously loads upcoming concerts, doors times, dates, performer lineups, and direct ticket links right inside map popups and sidebar location cards.
+  - Direct integration with **JamBase Data API v3** using canonical `venueId` lookups (not keyword search).
+  - Resolved JamBase IDs are cached locally so repeat schedule loads stay on the fast API path.
+  - Asynchronously loads upcoming concerts, door times, dates, performer lineups, and direct ticket links right inside map popups and sidebar location cards.
   - **Venue Max Capacity** tracking (`👥 Max Capacity: 1,200 people`).
   - Persistent **24-Hour Local Caching** with manual `🔄` refresh.
+  - HTML microdata scraping is used only when the API is actually unreachable (auth, rate limit after retry, or network error) — empty calendars no longer trip the slow fallback.
 - 🔍 **OpenStreetMap POI Discovery**: Automatically scan nearby cafes, parks, libraries, and EV charging stations via the **Overpass API** and import them with one click.
 - 🌤️ **Live Weather Forecasts**: Integrated hyper-local weather conditions powered by **Open-Meteo**.
 - 🔒 **100% Private & Local-First**: All location data, contact numbers, notes, and API keys are stored strictly in your browser (`localStorage`). No user data is sent to external application servers.
