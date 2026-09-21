@@ -514,6 +514,49 @@ describe('owner-switch presentation isolation', () => {
     app.dispose();
   });
 
+  test('JamBase selection persists the canonical ID before venue details resolve', async () => {
+    let resolveDetails;
+    JamBaseService.fetchVenueDetails = () => new Promise((resolve) => {
+      resolveDetails = resolve;
+    });
+    const selectedVenue = {
+      id: 'jambase:62877',
+      apiVenueId: 'jambase:62877',
+      slug: 'south-shore-music-circus',
+      name: 'South Shore Music Circus',
+      city: 'Cohasset',
+      state: 'US-MA',
+      capacity: '',
+    };
+    JamBaseService.searchVenues = async () => [selectedVenue];
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'South Shore Music Circus', lat: 42.24, lng: -70.80 });
+    ui.elements.formLocationId.value = '';
+    ui.elements.formName.value = 'South Shore Music Circus';
+    ui.elements.formLat.value = '42.24';
+    ui.elements.formLng.value = '-70.80';
+    ui.elements.formCategory.value = 'venue';
+    ui.elements.formJambaseId.value = 'south shore music circus';
+
+    await app.handleJambaseSearch();
+    const selectionPromise = ui.jambaseOnSelect(selectedVenue);
+
+    expect(ui.elements.formJambaseId.value).toBe('jambase:62877');
+    expect(ui.elements.formJambaseSlug.value).toBe('south-shore-music-circus');
+
+    app.handleSaveLocation();
+    const saved = StorageService.getSavedPlaces().find((place) => place.name === 'South Shore Music Circus');
+    expect(saved?.jambaseId).toBe('jambase:62877');
+    expect(saved?.jambaseSlug).toBe('south-shore-music-circus');
+
+    resolveDetails({ capacity: '2300' });
+    await selectionPromise;
+    app.dispose();
+  });
+
   test('manual JamBase ID edits clear the selected public slug', async () => {
     StorageService.setOwner(SESSION_A.user.id);
     const ui = createStubUi();
