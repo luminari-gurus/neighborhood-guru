@@ -1179,6 +1179,9 @@ export class NeighborhoodGuruApp {
         || !this.editorMatchesCurrentRequest(editorRevision)
         || searchId !== this.jambaseSearchGeneration) return;
 
+      if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
+      if (el.formJambaseSlug) el.formJambaseSlug.value = selectedVenue.slug || '';
+
       let capacity = selectedVenue.capacity;
       if (!capacity) {
         const details = await JamBaseService.fetchVenueDetails(selectedVenue.id, selectedVenue.slug);
@@ -1193,9 +1196,6 @@ export class NeighborhoodGuruApp {
       if (!this.isSameOwnerGeneration(generation, namespaceId)
         || !this.editorMatchesCurrentRequest(editorRevision)
         || searchId !== this.jambaseSearchGeneration) return;
-
-      if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
-      if (el.formJambaseSlug) el.formJambaseSlug.value = selectedVenue.slug || '';
 
       if (capacity && el.formCapacity) {
         el.formCapacity.value = capacity;
