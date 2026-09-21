@@ -4,6 +4,7 @@ export class JamBaseService {
   static CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Hours TTL
   // Same-origin proxy (Vite dev + production server) so Bearer auth is not stripped by CORS proxies.
   static API_PROXY_BASE = '/api-jambase/v3';
+  static LOCATION_TEXT_KEYS = Object.freeze(['identifier', 'alternateName', 'abbreviation', 'code', 'name', 'value']);
   static _apiFallbackNotified = false;
   static _onApiFallback = null;
 
@@ -187,6 +188,21 @@ export class JamBaseService {
     return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   }
 
+  static _locationText(value) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      return String(value).trim();
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+    for (const key of this.LOCATION_TEXT_KEYS) {
+      const candidate = value[key];
+      if (typeof candidate === 'string' || typeof candidate === 'number') {
+        const text = String(candidate).trim();
+        if (text) return text;
+      }
+    }
+    return '';
+  }
+
   static _pickVenueMatch(venues, { name, slug, city } = {}) {
     if (!Array.isArray(venues) || venues.length === 0) return null;
     const slugNorm = this._normalizeVenueText(slug);
@@ -216,9 +232,10 @@ export class JamBaseService {
     const identifier = this._venueIdentifier(venue);
     const slug = this._venueSlugFromRecord(venue);
     const address = venue.address || {};
-    const city = address.addressLocality || venue.city || '';
-    const state = address.addressRegion || venue.state || '';
-    const street = [address.streetAddress, city, state].filter(Boolean).join(', ');
+    const streetAddress = this._locationText(address.streetAddress);
+    const city = this._locationText(address.addressLocality) || this._locationText(venue.city);
+    const state = this._locationText(address.addressRegion) || this._locationText(venue.state);
+    const street = [streetAddress, city, state].filter(Boolean).join(', ');
     const capacity = venue.maximumAttendeeCapacity || venue.capacity || '';
     return {
       id: identifier || slug || this._normalizeVenueText(venue.name || fallbackName),

@@ -552,6 +552,73 @@ describe('JamBaseService venue search', () => {
     expect(globalThis.localStorage.getItem('guru_jb_venueid_neighborhood-theatre')).toBe('jambase:62108');
   });
 
+  test('normalizes a structured address region before rendering search results', async () => {
+    globalThis.localStorage = createMockLocalStorage({
+      neighborhood_guru_jambase_token: 'valid-api-key',
+    });
+
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/venues?')) {
+        return jsonResponse({
+          venues: [{
+            identifier: 'jambase:361426',
+            name: 'Plymouth Memorial Hall',
+            url: 'https://www.jambase.com/venue/plymouth-memorial-hall',
+            address: {
+              streetAddress: '83 Court St',
+              addressLocality: 'Plymouth',
+              addressRegion: {
+                '@type': 'State',
+                identifier: 'MA',
+                name: 'Massachusetts',
+              },
+            },
+          }],
+        });
+      }
+      return errorResponse(404);
+    };
+
+    const matches = await JamBaseService.searchVenues('Plymouth Memorial Hall');
+
+    expect(matches[0].id).toBe('jambase:361426');
+    expect(matches[0].city).toBe('Plymouth');
+    expect(matches[0].state).toBe('MA');
+    expect(matches[0].address).toBe('83 Court St, Plymouth, MA');
+  });
+
+  test('uses scalar venue fallbacks when structured address fields are malformed', async () => {
+    globalThis.localStorage = createMockLocalStorage({
+      neighborhood_guru_jambase_token: 'valid-api-key',
+    });
+
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/venues?')) {
+        return jsonResponse({
+          venues: [{
+            identifier: 'jambase:361426',
+            name: 'Plymouth Memorial Hall',
+            city: 'Plymouth',
+            state: 'MA',
+            address: {
+              streetAddress: { unexpected: '83 Court St' },
+              addressLocality: { unexpected: 'Plymouth' },
+              addressRegion: { unexpected: 'MA' },
+            },
+          }],
+        });
+      }
+      return errorResponse(404);
+    };
+
+    const matches = await JamBaseService.searchVenues('Plymouth Memorial Hall');
+
+    expect(matches[0].city).toBe('Plymouth');
+    expect(matches[0].state).toBe('MA');
+    expect(matches[0].address).toBe('Plymouth, MA');
+    expect(matches[0].address).not.toContain('[object Object]');
+  });
+
   test('sanitizes an upstream public slug before returning it', async () => {
     globalThis.localStorage = createMockLocalStorage({
       neighborhood_guru_jambase_token: 'valid-api-key',
