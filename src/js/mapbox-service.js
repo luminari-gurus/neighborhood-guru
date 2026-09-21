@@ -570,8 +570,10 @@ export class MapboxService {
 
       let jambasePopupHtml = '';
       const jbId = place.jambaseId || place.pollstarId;
+      const jbSlug = place.jambaseSlug || '';
       if (jbId) {
-        const jambaseUrl = jbId.startsWith('http') ? jbId : `https://www.jambase.com/venue/${jbId}`;
+        const publicVenueId = jbSlug || jbId;
+        const jambaseUrl = JamBaseService.getVenueUrl(publicVenueId);
         jambasePopupHtml = `
           <div id="popup-jb-shows-${place.id}" style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255,255,255,0.15);">
             <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -643,7 +645,7 @@ export class MapboxService {
             const token = String(Number(showsBody.dataset.showsGeneration || '0') + 1);
             showsBody.dataset.showsGeneration = token;
             if (force) showsBody.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
-            const shows = await JamBaseService.fetchUpcomingShows(jbId, force);
+            const shows = await JamBaseService.fetchUpcomingShows(jbId, force, jbSlug);
             if (this.tornDown || !showsBody || showsBody.dataset.showsGeneration !== token) return;
             if (shows && shows.length > 0) {
               showsBody.innerHTML = shows.map(s => `

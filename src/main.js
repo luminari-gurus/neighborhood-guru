@@ -725,6 +725,10 @@ export class NeighborhoodGuruApp {
       this.handleJambaseSearch();
     });
 
+    this.listen(el.formJambaseId, 'input', () => {
+      if (el.formJambaseSlug) el.formJambaseSlug.value = '';
+    });
+
     this.listen(el.formJambaseId, 'keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -1177,7 +1181,7 @@ export class NeighborhoodGuruApp {
 
       let capacity = selectedVenue.capacity;
       if (!capacity) {
-        const details = await JamBaseService.fetchVenueDetails(selectedVenue.id);
+        const details = await JamBaseService.fetchVenueDetails(selectedVenue.id, selectedVenue.slug);
         if (!this.isSameOwnerGeneration(generation, namespaceId)
         || !this.editorMatchesCurrentRequest(editorRevision)
         || searchId !== this.jambaseSearchGeneration) return;
@@ -1191,6 +1195,7 @@ export class NeighborhoodGuruApp {
         || searchId !== this.jambaseSearchGeneration) return;
 
       if (el.formJambaseId) el.formJambaseId.value = selectedVenue.id;
+      if (el.formJambaseSlug) el.formJambaseSlug.value = selectedVenue.slug || '';
 
       if (capacity && el.formCapacity) {
         el.formCapacity.value = capacity;
@@ -1227,7 +1232,13 @@ export class NeighborhoodGuruApp {
     const contacts = this.ui.getContactFieldsData();
     const events = this.ui.getEventFieldsData();
 
-    const jambaseId = el.formJambaseId ? el.formJambaseId.value.trim() : (el.formPollstarId ? el.formPollstarId.value.trim() : '');
+    const rawJambaseId = el.formJambaseId ? el.formJambaseId.value.trim() : (el.formPollstarId ? el.formPollstarId.value.trim() : '');
+    const jambaseId = JamBaseService.toJamBaseVenueId(rawJambaseId) || rawJambaseId;
+    const explicitJambaseSlug = el.formJambaseSlug ? el.formJambaseSlug.value.trim() : '';
+    const derivedJambaseSlug = rawJambaseId && !/^jambase:\d+$/i.test(rawJambaseId)
+      ? JamBaseService.extractVenueId(rawJambaseId)
+      : '';
+    const jambaseSlug = JamBaseService.extractVenueId(explicitJambaseSlug) || derivedJambaseSlug;
     const capacityVal = el.formCapacity ? el.formCapacity.value.trim() : '';
 
     const placeData = {
@@ -1238,6 +1249,7 @@ export class NeighborhoodGuruApp {
       category: el.formCategory.value,
       capacity: el.formCategory.value === 'venue' ? capacityVal : '',
       jambaseId: jambaseId,
+      jambaseSlug: jambaseSlug,
       people: people,
       contacts: contacts,
       events: events,

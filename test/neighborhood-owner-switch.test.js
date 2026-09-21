@@ -107,6 +107,7 @@ function createStubUi() {
     formCategory: 'favorite',
     formAddress: '102 Oak',
     formJambaseId: '',
+    formJambaseSlug: '',
     formCapacity: '',
   };
   const elements = {
@@ -119,6 +120,7 @@ function createStubUi() {
     formAddress: { get value() { return values.formAddress; }, set value(v) { values.formAddress = v; } },
     formCapacity: { get value() { return values.formCapacity; }, set value(v) { values.formCapacity = v; } },
     formJambaseId: { get value() { return values.formJambaseId; }, set value(v) { values.formJambaseId = v; } },
+    formJambaseSlug: { get value() { return values.formJambaseSlug; }, set value(v) { values.formJambaseSlug = v; } },
     jambasePickerSubtitle: { textContent: '' },
     jambaseStatusMsg: { textContent: '' },
     poiStatusSubtitle: { textContent: '' },
@@ -132,6 +134,7 @@ function createStubUi() {
         values.formLng = '';
         values.formAddress = '';
         values.formJambaseId = '';
+        values.formJambaseSlug = '';
         values.formCapacity = '';
       },
       querySelector: () => null,
@@ -460,6 +463,113 @@ describe('owner-switch presentation isolation', () => {
     expect(ui.elements.formCapacity.value).not.toBe(1200);
     expect(ui.elements.formCapacity.value).not.toBe('1200');
 
+    app.dispose();
+  });
+
+  test('JamBase selection saves the canonical ID and public slug separately', async () => {
+    let detailsRequest = null;
+    JamBaseService.fetchVenueDetails = async (...args) => {
+      detailsRequest = args;
+      return { capacity: '956' };
+    };
+    JamBaseService.searchVenues = async () => [{
+      id: 'jambase:62108',
+      apiVenueId: 'jambase:62108',
+      slug: 'neighborhood-theatre',
+      name: 'Neighborhood Theatre',
+      city: 'Charlotte',
+      state: 'NC',
+      capacity: '',
+    }];
+
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Neighborhood Theatre', lat: 35.24, lng: -80.81 });
+    ui.elements.formLocationId.value = '';
+    ui.elements.formName.value = 'Neighborhood Theatre';
+    ui.elements.formLat.value = '35.24';
+    ui.elements.formLng.value = '-80.81';
+    ui.elements.formCategory.value = 'venue';
+
+    await app.handleJambaseSearch();
+    expect(typeof ui.jambaseOnSelect).toBe('function');
+    await ui.jambaseOnSelect({
+      id: 'jambase:62108',
+      apiVenueId: 'jambase:62108',
+      slug: 'neighborhood-theatre',
+      name: 'Neighborhood Theatre',
+      city: 'Charlotte',
+      state: 'NC',
+      capacity: '',
+    });
+    app.handleSaveLocation();
+
+    const saved = StorageService.getSavedPlaces().find((place) => place.name === 'Neighborhood Theatre');
+    expect(detailsRequest).toEqual(['jambase:62108', 'neighborhood-theatre']);
+    expect(saved?.jambaseId).toBe('jambase:62108');
+    expect(saved?.jambaseSlug).toBe('neighborhood-theatre');
+    expect(saved?.capacity).toBe('956');
+
+    app.dispose();
+  });
+
+  test('manual JamBase ID edits clear the selected public slug', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const handlers = new Map();
+    ui.elements.formJambaseId = {
+      value: 'jambase:62108',
+      addEventListener(type, handler) { handlers.set(type, handler); },
+      removeEventListener(type) { handlers.delete(type); },
+    };
+    ui.elements.formJambaseSlug.value = 'neighborhood-theatre';
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.bindEvents();
+
+    handlers.get('input')?.({});
+
+    expect(ui.elements.formJambaseSlug.value).toBe('');
+    app.dispose();
+  });
+
+  test('saving a numeric JamBase ID persists the canonical identifier', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Numeric Venue', lat: 35.24, lng: -80.81 });
+    ui.elements.formLocationId.value = '';
+    ui.elements.formName.value = 'Numeric Venue';
+    ui.elements.formLat.value = '35.24';
+    ui.elements.formLng.value = '-80.81';
+    ui.elements.formCategory.value = 'venue';
+    ui.elements.formJambaseId.value = '62108';
+
+    app.handleSaveLocation();
+
+    const saved = StorageService.getSavedPlaces().find((place) => place.name === 'Numeric Venue');
+    expect(saved?.jambaseId).toBe('jambase:62108');
+    app.dispose();
+  });
+
+  test('resaving a legacy digit-suffixed slug preserves it separately', async () => {
+    StorageService.setOwner(SESSION_A.user.id);
+    const ui = createStubUi();
+    const { app } = await createBoundApp({ ui, session: SESSION_A });
+    app.openLocationEditor({ name: 'Legacy Venue', lat: 35.24, lng: -80.81 });
+    ui.elements.formLocationId.value = '';
+    ui.elements.formName.value = 'Legacy Venue';
+    ui.elements.formLat.value = '35.24';
+    ui.elements.formLng.value = '-80.81';
+    ui.elements.formCategory.value = 'venue';
+    ui.elements.formJambaseId.value = 'the-fillmore-15421';
+    ui.elements.formJambaseSlug.value = '';
+
+    app.handleSaveLocation();
+
+    const saved = StorageService.getSavedPlaces().find((place) => place.name === 'Legacy Venue');
+    expect(saved?.jambaseId).toBe('jambase:15421');
+    expect(saved?.jambaseSlug).toBe('the-fillmore-15421');
     app.dispose();
   });
 
@@ -1298,7 +1408,7 @@ describe('owner-switch presentation isolation', () => {
         this.showsBody = { innerHTML: '', dataset: {} };
         popups.push(this);
       }
-      setHTML() { return this; }
+      setHTML(html) { this.html = html; return this; }
       on(type, fn) { this.listeners.push({ type, fn }); return this; }
       getElement() {
         return {
@@ -1344,13 +1454,14 @@ describe('owner-switch presentation isolation', () => {
       const editClicks = [];
       const addClicks = [];
       const refreshCalls = [];
-      JamBaseService.fetchUpcomingShows = async (_id, force) => {
-        refreshCalls.push(Boolean(force));
+      JamBaseService.fetchUpcomingShows = async (id, force, slug) => {
+        refreshCalls.push({ id, force: Boolean(force), slug });
         return [];
       };
       service.renderSavedMarkers([{
         ...PLACE_A,
-        jambaseId: 'venue-1',
+        jambaseId: 'jambase:62108',
+        jambaseSlug: 'neighborhood-theatre" onmouseover="alert(1)',
       }], (place) => {
         editClicks.push(place.id);
       });
@@ -1361,10 +1472,18 @@ describe('owner-switch presentation isolation', () => {
       savedPopup.refreshBtn.onclick({ stopPropagation() {} });
       expect({
         editCallsAfterOneClick: editClicks.length,
-        refreshCallsAfterOneClick: refreshCalls.filter((force) => force).length,
+        refreshCallsAfterOneClick: refreshCalls.filter(({ force }) => force).length,
+        refreshIdentity: refreshCalls.find(({ force }) => force),
+        usesSanitizedPublicSlugLink: savedPopup.html.includes('href="https://www.jambase.com/venue/neighborhood-theatreonmouseoveralert1"'),
+        containsInjectedHandler: savedPopup.html.includes('onmouseover="alert(1)"'),
+        leaksCanonicalIdIntoLink: savedPopup.html.includes('https://www.jambase.com/venue/jambase:62108'),
       }).toEqual({
         editCallsAfterOneClick: 1,
         refreshCallsAfterOneClick: 1,
+        refreshIdentity: { id: 'jambase:62108', force: true, slug: 'neighborhood-theatre" onmouseover="alert(1)' },
+        usesSanitizedPublicSlugLink: true,
+        containsInjectedHandler: false,
+        leaksCanonicalIdIntoLink: false,
       });
 
       service.showTempMarker({ lat: 1, lng: 2 }, (coords) => {
@@ -1453,11 +1572,16 @@ describe('owner-switch presentation isolation', () => {
   test('older sidebar JamBase load does not overwrite a newer refresh', async () => {
     const ui = new UIController();
     const deferred = [];
+    const requests = [];
+    const cards = [];
     const originalFetchShows = JamBaseService.fetchUpcomingShows;
-    JamBaseService.fetchUpcomingShows = () => new Promise((resolve) => { deferred.push(resolve); });
+    JamBaseService.fetchUpcomingShows = (id, force, slug) => new Promise((resolve) => {
+      requests.push({ id, force: Boolean(force), slug });
+      deferred.push(resolve);
+    });
     const listEl = { innerHTML: '', dataset: {}, isConnected: true };
     const box = {
-      dataset: { jambaseId: 'venue-1' },
+      dataset: { jambaseId: 'jambase:62108', jambaseSlug: 'neighborhood-theatre" onmouseover="alert(1)' },
       querySelector(selector) {
         return String(selector).includes('jb-card-shows-list') ? listEl : this;
       },
@@ -1468,7 +1592,7 @@ describe('owner-switch presentation isolation', () => {
       handler: null,
       addEventListener(_type, handler) { this.handler = handler; },
       removeEventListener() {},
-      appendChild() {},
+      appendChild(node) { cards.push(node); },
       querySelectorAll() { return [box]; },
     };
     ui.elements.savedPlacesList = list;
@@ -1481,8 +1605,20 @@ describe('owner-switch presentation isolation', () => {
       },
     };
     try {
-      ui.renderPlacesList([{ ...PLACE_A, jambaseId: 'venue-1' }]);
+      ui.renderPlacesList([{
+        ...PLACE_A,
+        jambaseId: 'jambase:62108',
+        jambaseSlug: 'neighborhood-theatre" onmouseover="alert(1)',
+      }]);
       expect(deferred).toHaveLength(1);
+      expect(requests[0]).toEqual({
+        id: 'jambase:62108',
+        force: false,
+        slug: 'neighborhood-theatre" onmouseover="alert(1)',
+      });
+      expect(cards[0].innerHTML).toContain('href="https://www.jambase.com/venue/neighborhood-theatreonmouseoveralert1"');
+      expect(cards[0].innerHTML).not.toContain('onmouseover="alert(1)"');
+      expect(cards[0].innerHTML).not.toContain('https://www.jambase.com/venue/jambase:62108');
       list.handler?.({
         stopPropagation() {},
         target: {
@@ -1493,6 +1629,11 @@ describe('owner-switch presentation isolation', () => {
         },
       });
       expect(deferred).toHaveLength(2);
+      expect(requests[1]).toEqual({
+        id: 'jambase:62108',
+        force: true,
+        slug: 'neighborhood-theatre" onmouseover="alert(1)',
+      });
       deferred[1]([{ title: 'NEW', date: 'Fri', isToday: false, url: 'https://example.test/new' }]);
       await Promise.resolve();
       deferred[0]([{ title: 'OLD', date: 'Thu', isToday: false, url: 'https://example.test/old' }]);

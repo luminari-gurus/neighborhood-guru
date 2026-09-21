@@ -108,12 +108,13 @@ export class UIController {
         e.stopPropagation();
         const box = refreshBtn.closest('.jb-card-shows-box');
         const jbId = box?.dataset?.jambaseId;
+        const jbSlug = box?.dataset?.jambaseSlug || '';
         const listEl = box?.querySelector('.jb-card-shows-list');
         if (!jbId || !listEl) return;
         const token = String(Number(listEl.dataset.showsGeneration || '0') + 1);
         listEl.dataset.showsGeneration = token;
         listEl.innerHTML = `<span style="font-size: 0.72rem; color: #a855f7;">Refreshing JamBase schedule...</span>`;
-        JamBaseService.fetchUpcomingShows(jbId, true).then((shows) => {
+        JamBaseService.fetchUpcomingShows(jbId, true, jbSlug).then((shows) => {
           if (this.disposed || !listEl.isConnected || listEl.dataset.showsGeneration !== token) return;
           this.renderSidebarJamBaseShows(listEl, shows);
         });
@@ -261,6 +262,7 @@ export class UIController {
       formCapacityContainer: document.getElementById('form-capacity-container'),
       formCapacity: document.getElementById('form-capacity'),
       formJambaseId: document.getElementById('form-jambase-id'),
+      formJambaseSlug: document.getElementById('form-jambase-slug'),
       searchJambaseBtn: document.getElementById('search-jambase-btn'),
       jambaseStatusMsg: document.getElementById('jambase-status-msg'),
       addPersonFieldBtn: document.getElementById('add-person-field-btn'),
@@ -725,6 +727,9 @@ export class UIController {
     if (this.elements.formJambaseId) {
       this.elements.formJambaseId.value = jbId;
     }
+    if (this.elements.formJambaseSlug) {
+      this.elements.formJambaseSlug.value = data.jambaseSlug || '';
+    }
     if (this.elements.jambaseStatusMsg) {
       this.elements.jambaseStatusMsg.textContent = jbId ? `✓ Linked to JamBase Venue (${jbId})` : '';
     }
@@ -769,7 +774,7 @@ export class UIController {
     }
     for (const field of [
       'formLocationId', 'formLat', 'formLng', 'formName', 'formCategory',
-      'formAddress', 'formNotes', 'formCapacity', 'formJambaseId', 'formPollstarId',
+      'formAddress', 'formNotes', 'formCapacity', 'formJambaseId', 'formJambaseSlug', 'formPollstarId',
     ]) {
       if (el[field]) el[field].value = '';
     }
@@ -922,10 +927,12 @@ export class UIController {
 
       let jambaseCardHtml = '';
       const jbId = place.jambaseId || place.pollstarId;
+      const jbSlug = place.jambaseSlug || '';
       if (jbId) {
-        const jambaseUrl = jbId.startsWith('http') ? jbId : `https://www.jambase.com/venue/${jbId}`;
+        const publicVenueId = jbSlug || jbId;
+        const jambaseUrl = JamBaseService.getVenueUrl(publicVenueId);
         jambaseCardHtml = `
-          <div class="jb-card-shows-box" data-jambase-id="${this.escapeHtml(jbId)}" style="margin-top: 8px; padding: 8px 10px; background: rgba(168, 85, 247, 0.08); border-radius: 8px; border: 1px solid rgba(168, 85, 247, 0.25);">
+          <div class="jb-card-shows-box" data-jambase-id="${this.escapeHtml(jbId)}" data-jambase-slug="${this.escapeHtml(jbSlug)}" style="margin-top: 8px; padding: 8px 10px; background: rgba(168, 85, 247, 0.08); border-radius: 8px; border: 1px solid rgba(168, 85, 247, 0.25);">
             <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.76rem; color: #c084fc; font-weight: 700;">
               <span>🎸 Upcoming Shows</span>
               <div style="display: flex; align-items: center; gap: 6px;">
@@ -982,11 +989,12 @@ export class UIController {
 
     listContainer.querySelectorAll('.jb-card-shows-box').forEach((box) => {
       const jbId = box.dataset.jambaseId;
+      const jbSlug = box.dataset.jambaseSlug || '';
       const listEl = box.querySelector('.jb-card-shows-list');
       if (!jbId || !listEl) return;
       const token = String(Number(listEl.dataset.showsGeneration || '0') + 1);
       listEl.dataset.showsGeneration = token;
-      JamBaseService.fetchUpcomingShows(jbId, false).then((shows) => {
+      JamBaseService.fetchUpcomingShows(jbId, false, jbSlug).then((shows) => {
         if (this.disposed || !listEl.isConnected || listEl.dataset.showsGeneration !== token) return;
         this.renderSidebarJamBaseShows(listEl, shows);
       });
