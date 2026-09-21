@@ -88,7 +88,7 @@ export class JamBaseService {
     // Check if full JamBase URL was pasted
     const urlMatch = trimmed.match(/jambase\.com\/venue\/([^\s?#]+)/i);
     if (urlMatch && urlMatch[1]) {
-      return urlMatch[1].replace(/\/$/, '');
+      return urlMatch[1].replace(/\/$/, '').replace(/[^\w:-]/g, '');
     }
 
     // Clean input slug/ID (allow colon so jambase:123 survives if it appears mid-string)
@@ -177,10 +177,10 @@ export class JamBaseService {
 
   static _venueSlugFromRecord(venue) {
     if (!venue) return null;
-    if (venue.slug) return String(venue.slug);
     const url = venue.url || venue['@id'] || '';
     const match = String(url).match(/jambase\.com\/venue\/([^\s?#/]+)/i);
-    return match ? match[1].replace(/\/$/, '') : null;
+    const rawSlug = venue.slug || (match ? match[1].replace(/\/$/, '') : '');
+    return this.extractVenueId(rawSlug) || null;
   }
 
   static _normalizeVenueText(value) {
@@ -221,8 +221,9 @@ export class JamBaseService {
     const street = [address.streetAddress, city, state].filter(Boolean).join(', ');
     const capacity = venue.maximumAttendeeCapacity || venue.capacity || '';
     return {
-      id: slug || identifier || this._normalizeVenueText(venue.name || fallbackName),
+      id: identifier || slug || this._normalizeVenueText(venue.name || fallbackName),
       apiVenueId: identifier,
+      slug,
       name: venue.name || fallbackName,
       city,
       state,
@@ -253,7 +254,7 @@ export class JamBaseService {
           .filter((venue) => venue.id);
         if (venues.length > 0) {
           venues.forEach((venue) => {
-            const cacheKey = this.extractVenueId(venue.id);
+            const cacheKey = this.extractVenueId(venue.slug || venue.id);
             if (cacheKey && venue.apiVenueId) {
               this.setResolvedVenueId(cacheKey, venue.apiVenueId);
             }
@@ -322,10 +323,12 @@ export class JamBaseService {
   /**
    * Fetch extra venue metadata (such as max capacity) from JamBase venue microdata or API
    */
-  static async fetchVenueDetails(jambaseId) {
+  static async fetchVenueDetails(jambaseId, jambaseSlug = '') {
     if (!jambaseId) return null;
     const cleanId = this.extractVenueId(jambaseId);
     if (!cleanId) return null;
+    const cleanSlug = this.extractVenueId(jambaseSlug);
+    const publicVenueSlug = cleanSlug && !/^jambase:\d+$/i.test(cleanSlug) ? cleanSlug : cleanId;
 
     const apiKey = StorageService.getJambaseToken();
     const venueId = this.getResolvedVenueId(cleanId) || this.toJamBaseVenueId(jambaseId) || this.toJamBaseVenueId(cleanId);
@@ -339,7 +342,7 @@ export class JamBaseService {
     }
 
     try {
-      const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
+      const targetUrl = `https://www.jambase.com/venue/${publicVenueSlug}`;
       const proxyUrls = [
         `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
         `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
@@ -473,7 +476,7 @@ export class JamBaseService {
     return Array.isArray(raw) ? raw : [];
   }
 
-  static _mapApiEvents(rawEvents, cleanId) {
+  static _mapApiEvents(rawEvents, publicVenueSlug) {
     const todayStr = new Date().toDateString();
     return rawEvents.map((ev) => {
       const startDateStr = ev.startDate || ev.eventDate || ev.dateTime || ev.date;
@@ -491,7 +494,7 @@ export class JamBaseService {
         date: startDate ? startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' }) : '',
         time: startDate ? startDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
         isToday,
-        url: ev.url || ev.ticketUrl || `https://www.jambase.com/venue/${cleanId}`,
+        url: ev.url || ev.ticketUrl || `https://www.jambase.com/venue/${publicVenueSlug}`,
       };
     });
   }
@@ -500,10 +503,12 @@ export class JamBaseService {
    * Fetch upcoming concert schedule from JamBase Data API v3, with HTML scraper fallback.
    * Empty API results are a successful "no upcoming shows" — not a reason to scrape.
    */
-  static async fetchUpcomingShows(jambaseId, forceRefresh = false) {
+  static async fetchUpcomingShows(jambaseId, forceRefresh = false, jambaseSlug = '') {
     if (!jambaseId) return [];
     const cleanId = this.extractVenueId(jambaseId);
     if (!cleanId || cleanId.startsWith('search:')) return [];
+    const cleanSlug = this.extractVenueId(jambaseSlug);
+    const publicVenueSlug = cleanSlug && !/^jambase:\d+$/i.test(cleanSlug) ? cleanSlug : cleanId;
 
     if (!forceRefresh) {
       const cached = this.getCachedShows(cleanId);
@@ -524,7 +529,7 @@ export class JamBaseService {
         || this.toJamBaseVenueId(cleanId);
 
       const acceptEvents = (rawEvents) => {
-        const finalShows = this._mapApiEvents(rawEvents, cleanId).slice(0, 5);
+        const finalShows = this._mapApiEvents(rawEvents, publicVenueSlug).slice(0, 5);
         if (finalShows.length) {
           console.log('✓ JamBase Data API v3 shows loaded:', finalShows);
         }
@@ -587,7 +592,7 @@ export class JamBaseService {
     }
 
     // Fallback: scrape JamBase venue HTML via CORS proxies if no key is configured or the API failed.
-    const targetUrl = `https://www.jambase.com/venue/${cleanId}`;
+    const targetUrl = `https://www.jambase.com/venue/${publicVenueSlug}`;
     const proxyUrls = [
       `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
       `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,

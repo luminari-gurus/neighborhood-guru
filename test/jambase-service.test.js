@@ -306,6 +306,86 @@ describe('JamBaseService API fallback notification', () => {
     expect(shows[0].title).toBe('Fallback Show');
   });
 
+  test('uses the saved public slug when a canonical ID falls back to scraping', async () => {
+    const scraperTargets = [];
+    globalThis.localStorage = createMockLocalStorage({
+      neighborhood_guru_jambase_token: 'valid-api-key',
+    });
+
+    globalThis.fetch = async (url) => {
+      const value = String(url);
+      if (value.includes('/events?')) {
+        throw new Error('events endpoint unavailable');
+      }
+      if (isScraperUrl(value)) {
+        scraperTargets.push(decodeURIComponent(value));
+        return jsonResponse('<script type="application/ld+json">{"@type":"MusicEvent","name":"Fallback Show","startDate":"2026-10-01T20:00:00Z"}</script>');
+      }
+      return errorResponse(404);
+    };
+
+    const shows = await JamBaseService.fetchUpcomingShows(
+      'jambase:62108',
+      true,
+      'neighborhood-theatre'
+    );
+
+    expect(scraperTargets.some((url) => url.includes('https://www.jambase.com/venue/neighborhood-theatre'))).toBe(true);
+    expect(scraperTargets.some((url) => url.includes('/venue/jambase:62108'))).toBe(false);
+    expect(shows[0].title).toBe('Fallback Show');
+  });
+
+  test('uses the public slug for canonical venue-details scraper fallback', async () => {
+    const scraperTargets = [];
+    globalThis.localStorage = createMockLocalStorage({
+      neighborhood_guru_jambase_token: 'valid-api-key',
+    });
+
+    globalThis.fetch = async (url) => {
+      const value = String(url);
+      if (value.includes('/venues/id/')) {
+        return errorResponse(500, 'venue details unavailable');
+      }
+      if (isScraperUrl(value)) {
+        scraperTargets.push(decodeURIComponent(value));
+        return new Response('{"maximumAttendeeCapacity":"956"}', { status: 200 });
+      }
+      return errorResponse(404);
+    };
+
+    const details = await JamBaseService.fetchVenueDetails(
+      'jambase:62108',
+      'neighborhood-theatre'
+    );
+
+    expect(scraperTargets.some((url) => url.includes('https://www.jambase.com/venue/neighborhood-theatre'))).toBe(true);
+    expect(scraperTargets.some((url) => url.includes('/venue/jambase:62108'))).toBe(false);
+    expect(details).toEqual({ capacity: '956' });
+  });
+
+  test('uses the public slug for API events without their own URL', async () => {
+    globalThis.localStorage = createMockLocalStorage({
+      neighborhood_guru_jambase_token: 'valid-api-key',
+    });
+
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/events?')) {
+        return jsonResponse({
+          events: [{ name: 'Slugless Show', startDate: '2026-10-01T20:00:00Z' }],
+        });
+      }
+      return errorResponse(404);
+    };
+
+    const shows = await JamBaseService.fetchUpcomingShows(
+      'jambase:62108',
+      true,
+      'neighborhood-theatre'
+    );
+
+    expect(shows[0].url).toBe('https://www.jambase.com/venue/neighborhood-theatre');
+  });
+
   test('retries 429 with Retry-After and stays on the API', async () => {
     let callbackCalled = false;
     let apiHits = 0;
@@ -429,6 +509,12 @@ describe('JamBaseService utility methods', () => {
     expect(JamBaseService.getVenueUrl('12345'))
       .toBe('https://www.jambase.com/venue/12345');
   });
+
+  test('getVenueUrl sanitizes hostile full JamBase URLs', () => {
+    expect(JamBaseService.getVenueUrl(
+      'https://www.jambase.com/venue/foo-bar"><svg/onload=alert(1)>'
+    )).toBe('https://www.jambase.com/venue/foo-barsvgonloadalert1');
+  });
 });
 
 describe('JamBaseService venue search', () => {
@@ -437,7 +523,7 @@ describe('JamBaseService venue search', () => {
     globalThis.localStorage = originalLocalStorage;
   });
 
-  test('keeps the public slug and caches the canonical Data API identifier', async () => {
+  test('returns the canonical ID and a separate public slug', async () => {
     globalThis.localStorage = createMockLocalStorage({
       neighborhood_guru_jambase_token: 'valid-api-key',
     });
@@ -458,10 +544,35 @@ describe('JamBaseService venue search', () => {
     };
 
     const matches = await JamBaseService.searchVenues('Neighborhood Theatre');
-    expect(matches[0].id).toBe('neighborhood-theatre');
+    expect(matches[0].id).toBe('jambase:62108');
+    expect(matches[0].slug).toBe('neighborhood-theatre');
     expect(matches[0].url).toBe('https://www.jambase.com/venue/neighborhood-theatre');
     expect(matches[0].city).toBe('Charlotte');
     expect(matches[0].capacity).toBe('956');
     expect(globalThis.localStorage.getItem('guru_jb_venueid_neighborhood-theatre')).toBe('jambase:62108');
+  });
+
+  test('sanitizes an upstream public slug before returning it', async () => {
+    globalThis.localStorage = createMockLocalStorage({
+      neighborhood_guru_jambase_token: 'valid-api-key',
+    });
+
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/venues?')) {
+        return jsonResponse({
+          venues: [{
+            identifier: 'jambase:62108',
+            slug: 'neighborhood-theatre" onmouseover="alert(1)',
+            name: 'Neighborhood Theatre',
+          }],
+        });
+      }
+      return errorResponse(404);
+    };
+
+    const matches = await JamBaseService.searchVenues('Neighborhood Theatre');
+
+    expect(matches[0].id).toBe('jambase:62108');
+    expect(matches[0].slug).toBe('neighborhood-theatreonmouseoveralert1');
   });
 });
